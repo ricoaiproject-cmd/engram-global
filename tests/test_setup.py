@@ -1,7 +1,7 @@
-"""setup.py の純粋ロジックをテストする。
+"""Tests the pure logic of setup.py.
 
-実際のエージェント登録コマンドは実行しない。
-ENGRAM_HOME を tmp_path に monkeypatch して純粋ロジックをテストする。
+Does not run the actual agent registration commands.
+Monkeypatches ENGRAM_HOME to tmp_path to test the pure logic.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from engram.setup import (
 
 
 # ---------------------------------------------------------------------------
-# config.toml の生成と冪等性
+# Generation and idempotency of config.toml
 # ---------------------------------------------------------------------------
 
 class TestConfigToml:
@@ -59,7 +59,7 @@ class TestConfigToml:
         assert data["dup_threshold"] == 0.95
 
     def test_new_config_created(self, tmp_path):
-        """新規の場合は config.toml が作成される。"""
+        """config.toml is created when it doesn't exist yet."""
         cfg = tmp_path / "sub" / "config.toml"
         write_config_toml(cfg, {"memories_dir": "/some/path"})
         assert cfg.is_file()
@@ -67,7 +67,7 @@ class TestConfigToml:
         assert data["memories_dir"] == "/some/path"
 
     def test_existing_config_respected_on_merge(self, tmp_path):
-        """既存 config.toml があれば上書きされず、merge のみ。"""
+        """If config.toml already exists, it is not overwritten, only merged."""
         cfg = tmp_path / "config.toml"
         cfg.write_text("memories_dir = '/original/path'\n", encoding="utf-8")
         merge_config_toml(cfg, {"new_key": "new_value"})
@@ -77,7 +77,7 @@ class TestConfigToml:
 
 
 # ---------------------------------------------------------------------------
-# CLAUDE.md への追記ロジック
+# Append logic for CLAUDE.md
 # ---------------------------------------------------------------------------
 
 class TestClaudeMd:
@@ -101,8 +101,8 @@ class TestClaudeMd:
 
         ok, msg = update_claude_md(claude_md, protocol)
         assert ok
-        assert "スキップ" in msg
-        # 内容が重複追加されていないこと
+        assert "skipped" in msg
+        # The content is not duplicated
         content = claude_md.read_text(encoding="utf-8")
         assert content.count("engram") == 1
 
@@ -131,7 +131,7 @@ class TestClaudeMd:
 
 
 # ---------------------------------------------------------------------------
-# AGENTS.md への追記ロジック
+# Append logic for AGENTS.md
 # ---------------------------------------------------------------------------
 
 class TestAgentsMd:
@@ -154,7 +154,7 @@ class TestAgentsMd:
 
         ok, msg = update_agents_md(agents_md, protocol)
         assert ok
-        assert "スキップ" in msg
+        assert "skipped" in msg
 
     def test_creates_file_if_not_exists(self, tmp_path):
         agents_md = tmp_path / ".codex" / "AGENTS.md"
@@ -172,7 +172,7 @@ class TestAgentsMd:
         original = "# 既存のAGENTS設定\n\nここに元の文章。\n"
         agents_md.write_text(original, encoding="utf-8")
         protocol = tmp_path / "MEMORY_PROTOCOL.md"
-        # プロトコル本文には engram が含まれることを前提とする
+        # Assumes the protocol body contains "engram"
         protocol.write_text("# engram 記憶プロトコル\n詳細手順。\n", encoding="utf-8")
 
         update_agents_md(agents_md, protocol)
@@ -182,7 +182,7 @@ class TestAgentsMd:
 
 
 # ---------------------------------------------------------------------------
-# GEMINI.md への追記ロジック
+# Append logic for GEMINI.md
 # ---------------------------------------------------------------------------
 
 class TestGeminiMd:
@@ -205,7 +205,7 @@ class TestGeminiMd:
 
         ok, msg = update_gemini_md(gemini_md, protocol)
         assert ok
-        assert "スキップ" in msg
+        assert "skipped" in msg
         content = gemini_md.read_text(encoding="utf-8")
         assert content.count("engram") == 1
 
@@ -221,7 +221,7 @@ class TestGeminiMd:
 
 
 # ---------------------------------------------------------------------------
-# mcp_config.json への JSON 挿入ロジック
+# JSON insertion logic for mcp_config.json
 # ---------------------------------------------------------------------------
 
 class TestGeminiMcpJson:
@@ -236,7 +236,7 @@ class TestGeminiMcpJson:
         assert "engram" in data["mcpServers"]
 
     def test_idempotent_if_already_registered(self, tmp_path):
-        """同じパスで登録済みならスキップ。"""
+        """Skip if already registered with the same path."""
         fake_mcp = tmp_path / "engram-mcp.exe"
         fake_mcp.write_bytes(b"")
         same_path = str(fake_mcp).replace("\\", "/")
@@ -249,13 +249,13 @@ class TestGeminiMcpJson:
 
         ok, msg = register_gemini_mcp(mcp_json, fake_mcp)
         assert ok
-        assert "スキップ" in msg
-        # 重複追加されていないこと
+        assert "skipped" in msg
+        # No duplicate entry was added
         data = json.loads(mcp_json.read_text(encoding="utf-8"))
         assert len(data["mcpServers"]) == 1
 
     def test_stale_path_is_updated(self, tmp_path):
-        """登録済みでもパスが古ければ更新する(壊れたパスを残さない)。"""
+        """Even if already registered, update it if the path is stale (don't leave a broken path)."""
         mcp_json = tmp_path / ".gemini" / "config" / "mcp_config.json"
         mcp_json.parent.mkdir(parents=True, exist_ok=True)
         mcp_json.write_text(
@@ -270,10 +270,10 @@ class TestGeminiMcpJson:
 
         ok, msg = register_gemini_mcp(mcp_json, fake_mcp)
         assert ok
-        assert "更新" in msg
+        assert "updated" in msg
         data = json.loads(mcp_json.read_text(encoding="utf-8"))
         assert data["mcpServers"]["engram"]["command"] == str(fake_mcp).replace("\\", "/")
-        assert "other" in data["mcpServers"]  # 他のサーバーは無傷
+        assert "other" in data["mcpServers"]  # Other servers are untouched
 
     def test_existing_servers_preserved(self, tmp_path):
         mcp_json = tmp_path / ".gemini" / "config" / "mcp_config.json"
@@ -296,19 +296,19 @@ class TestGeminiMcpJson:
         assert "engram" in data["mcpServers"]
 
     def test_json_indent_2(self, tmp_path):
-        """インデント2で書き戻されることを確認。"""
+        """Confirm it is written back with 2-space indentation."""
         mcp_json = tmp_path / ".gemini" / "config" / "mcp_config.json"
         fake_mcp = tmp_path / "engram-mcp.exe"
         fake_mcp.write_bytes(b"")
 
         register_gemini_mcp(mcp_json, fake_mcp)
         text = mcp_json.read_text(encoding="utf-8")
-        # インデント2なら "  " で始まる行がある
+        # With 2-space indentation, some lines start with "  "
         assert any(line.startswith("  ") for line in text.splitlines())
 
 
 # ---------------------------------------------------------------------------
-# Codex config.toml へのテキスト追記の冪等性
+# Idempotency of text appended to Codex's config.toml
 # ---------------------------------------------------------------------------
 
 class TestCodexConfig:
@@ -321,11 +321,11 @@ class TestCodexConfig:
         assert ok
         content = codex_cfg.read_text(encoding="utf-8")
         assert "[mcp_servers.engram]" in content
-        # 既定30秒では起動が間に合わないことがあるため必ず明示する
+        # Must always be set explicitly, since the default 30 seconds can be too short for startup
         assert "startup_timeout_sec = 120.0" in content
 
     def test_idempotent_if_already_registered(self, tmp_path):
-        """同じパスで登録済み(起動待ち時間も設定済み)ならスキップ。"""
+        """Skip if already registered with the same path (with the startup timeout also already set)."""
         fake_mcp = tmp_path / "engram-mcp.exe"
         fake_mcp.write_bytes(b"")
         same_path = str(fake_mcp).replace("\\", "/")
@@ -339,16 +339,16 @@ class TestCodexConfig:
 
         ok, msg = register_codex(codex_cfg, fake_mcp)
         assert ok
-        assert "スキップ" in msg
+        assert "skipped" in msg
         content = codex_cfg.read_text(encoding="utf-8")
-        # 重複追加されていないこと
+        # No duplicate entry was added
         assert content.count("[mcp_servers.engram]") == 1
         assert content.count("startup_timeout_sec") == 1
 
     def test_timeout_added_to_legacy_entry(self, tmp_path):
-        """旧バージョンで登録された(起動待ち時間なし)ブロックには追記する。
-        実機で発生: Codex 既定の初期接続30秒では engram の起動
-        (モデル読込+記憶フォルダ確認)が間に合わず接続タイムアウトした。"""
+        """Appends to a block that was registered by an older version (without a startup timeout).
+        Observed in practice: Codex's default 30-second initial connection window was too short
+        for engram to start up (model loading + memory folder check), causing a connection timeout."""
         fake_mcp = tmp_path / "engram-mcp.exe"
         fake_mcp.write_bytes(b"")
         same_path = str(fake_mcp).replace("\\", "/")
@@ -362,21 +362,22 @@ class TestCodexConfig:
 
         ok, msg = register_codex(codex_cfg, fake_mcp)
         assert ok
-        assert "起動待ち時間" in msg
+        assert "startup timeout" in msg
         content = codex_cfg.read_text(encoding="utf-8")
         assert "startup_timeout_sec = 120.0" in content
-        # command 行の直後(ブロック内)に入っていること
+        # It is inserted right after the command line (inside the block)
         assert re.search(
             r"\[mcp_servers\.engram\]\ncommand = '[^']*'\nstartup_timeout_sec = 120\.0\n",
             content,
         )
-        # tools サブセクション等の他の設定は無傷
+        # Other settings, such as the tools subsection, are untouched
         assert "[mcp_servers.engram.tools.recall]" in content
         assert content.count("startup_timeout_sec") == 1
 
     def test_timeout_added_to_double_quoted_entry(self, tmp_path):
-        """Codex 本体が config.toml を書き直すと引用符が二重引用符に変わる
-        ことがある(実機で確認)。その形式のブロックにも追記できる。"""
+        """When Codex itself rewrites config.toml, the quote style can change to
+        double quotes (observed in practice). This should still append to that
+        style of block."""
         fake_mcp = tmp_path / "engram-mcp.exe"
         fake_mcp.write_bytes(b"")
         same_path = str(fake_mcp).replace("\\", "/")
@@ -388,15 +389,15 @@ class TestCodexConfig:
 
         ok, msg = register_codex(codex_cfg, fake_mcp)
         assert ok
-        assert "起動待ち時間" in msg
+        assert "startup timeout" in msg
         content = codex_cfg.read_text(encoding="utf-8")
         assert "startup_timeout_sec = 120.0" in content
-        assert f'command = "{same_path}"' in content  # 引用符スタイルは維持
+        assert f'command = "{same_path}"' in content  # Quote style is preserved
         assert content.count("[mcp_servers.engram]") == 1
 
     def test_stale_path_is_updated(self, tmp_path):
-        """登録済みでもパスが古ければ更新する(壊れたパスを残さない)。
-        職場PC実機で発生: 1回目の失敗時のネットワークパスが残り Codex が接続不能になった。"""
+        """Even if already registered, update it if the path is stale (don't leave a broken path).
+        Observed on a real work PC: a leftover network path from a first failed attempt left Codex unable to connect."""
         codex_cfg = tmp_path / ".codex" / "config.toml"
         codex_cfg.parent.mkdir(parents=True, exist_ok=True)
         codex_cfg.write_text(
@@ -408,11 +409,11 @@ class TestCodexConfig:
 
         ok, msg = register_codex(codex_cfg, fake_mcp)
         assert ok
-        assert "更新" in msg
+        assert "updated" in msg
         content = codex_cfg.read_text(encoding="utf-8")
         assert str(fake_mcp).replace("\\", "/") in content
         assert "//old-server/broken" not in content
-        assert "[other]" in content  # 他の設定は無傷
+        assert "[other]" in content  # Other settings are untouched
         assert content.count("[mcp_servers.engram]") == 1
 
     def test_existing_content_preserved(self, tmp_path):
@@ -440,7 +441,7 @@ class TestCodexConfig:
 
 
 # ---------------------------------------------------------------------------
-# テンプレートコピー
+# Template copying
 # ---------------------------------------------------------------------------
 
 class TestCopyTemplates:
@@ -459,7 +460,7 @@ class TestCopyTemplates:
         assert len(onboarding_text) > 100
 
     def test_overwrite_existing(self, tmp_path):
-        """既存ファイルを上書きできること。"""
+        """An existing file can be overwritten."""
         dest = tmp_path / "engram"
         dest.mkdir(parents=True, exist_ok=True)
         (dest / "MEMORY_PROTOCOL.md").write_text("old content", encoding="utf-8")
@@ -480,7 +481,7 @@ class TestCopyTemplates:
 # ---------------------------------------------------------------------------
 
 class TestParseAgents:
-    # --- 正常系 ---
+    # --- normal cases ---
     def test_single_claude(self):
         assert parse_agents("claude") == {"claude"}
 
@@ -508,13 +509,13 @@ class TestParseAgents:
     def test_antigravity_mixed_case(self):
         assert parse_agents("ANTIGRAVITY") == {"gemini"}
 
-    # --- 異常系 ---
+    # --- error cases ---
     def test_invalid_name_raises_value_error(self):
         with pytest.raises(ValueError) as exc_info:
             parse_agents("unknown")
         msg = str(exc_info.value)
         assert "unknown" in msg
-        # エラーメッセージに有効名が含まれること
+        # The error message includes the valid names
         assert "claude" in msg
         assert "codex" in msg
 
@@ -523,10 +524,10 @@ class TestParseAgents:
             parse_agents("claude,bad_agent")
         msg = str(exc_info.value)
         assert "bad_agent" in msg
-        assert "claude" in msg  # 有効名の一覧が含まれる
+        assert "claude" in msg  # includes the list of valid names
 
     def test_valid_names_listed_in_error(self):
-        """エラーメッセージにすべての有効エイリアスが含まれること。"""
+        """The error message includes all valid aliases."""
         with pytest.raises(ValueError) as exc_info:
             parse_agents("nope")
         msg = str(exc_info.value)
@@ -535,36 +536,36 @@ class TestParseAgents:
 
 
 # ---------------------------------------------------------------------------
-# setup_main の agents フィルタ
+# setup_main's agents filter
 # ---------------------------------------------------------------------------
 
 class TestSetupMainAgentsFilter:
-    """実コマンドを実行せず、パス注入でファイルへの副作用だけを検証する。
+    """Verifies only the file side effects via path injection, without running real commands.
 
-    shutil.which を None 固定にして claude は常に「未検出」にする。
-    codex / gemini は tmp_path 配下のディレクトリ有無で制御する。
+    Pins shutil.which to None so claude is always "not found".
+    codex / gemini are controlled by whether their directory exists under tmp_path.
     """
 
     @pytest.fixture()
     def patch_which_none(self, monkeypatch):
-        """shutil.which を常に None を返すようにパッチ。"""
+        """Patch shutil.which to always return None."""
         import shutil as _shutil
         import engram.setup as setup_mod
         monkeypatch.setattr(setup_mod.shutil, "which", lambda *a, **kw: None)
 
     @pytest.fixture()
     def fake_engram_mcp(self, tmp_path):
-        """偽の engram-mcp 実行可能ファイルを作成し、get_engram_mcp_path をパッチ。"""
+        """Create a fake engram-mcp executable and patch get_engram_mcp_path."""
         import engram.setup as setup_mod
         mcp = tmp_path / "engram-mcp.exe"
         mcp.write_bytes(b"")
         return mcp
 
     def _run_setup(self, tmp_path, monkeypatch, fake_mcp, agents, non_interactive=True):
-        """setup_main を最小限の引数で呼び出す共通ヘルパー。"""
+        """Common helper to call setup_main with minimal arguments."""
         import engram.setup as setup_mod
 
-        # engram_home / config 周りを tmp_path に向ける
+        # Point engram_home / config paths at tmp_path
         engram_home = tmp_path / "engram_home"
         engram_home.mkdir(parents=True, exist_ok=True)
         config_file = engram_home / "config.toml"
@@ -572,15 +573,15 @@ class TestSetupMainAgentsFilter:
         codex_dir = tmp_path / "codex"
         gemini_dir = tmp_path / "gemini"
 
-        # codex / gemini ディレクトリを作る(存在=「検出済み」扱い)
+        # Create the codex / gemini directories (existing = treated as "detected")
         codex_dir.mkdir()
         (gemini_dir / "config").mkdir(parents=True)
 
-        # engram-mcp の検索をパッチ
+        # Patch the engram-mcp lookup
         monkeypatch.setattr(setup_mod, "get_engram_mcp_path", lambda: fake_mcp)
 
-        # MarkdownStore / embedder / build_engine はスキップさせるため
-        # RuriEmbedder をパッチして即 raise させる
+        # Patch RuriEmbedder to raise immediately, so MarkdownStore /
+        # embedder / build_engine are skipped
         import engram.embedder as emb_mod
         monkeypatch.setattr(emb_mod, "RuriEmbedder", lambda: (_ for _ in ()).throw(RuntimeError("skip")))
 
@@ -599,33 +600,33 @@ class TestSetupMainAgentsFilter:
     def test_agents_codex_only_writes_codex_not_gemini(
         self, tmp_path, monkeypatch, patch_which_none, fake_engram_mcp
     ):
-        """agents={"codex"} のとき codex だけ書かれ gemini は変更なし。"""
+        """With agents={"codex"}, only codex is written and gemini is unchanged."""
         codex_dir, gemini_dir = self._run_setup(
             tmp_path, monkeypatch, fake_engram_mcp, agents={"codex"}
         )
-        # codex の config.toml が作成されている
+        # codex's config.toml has been created
         codex_cfg = codex_dir / "config.toml"
         assert codex_cfg.is_file()
         assert "[mcp_servers.engram]" in codex_cfg.read_text(encoding="utf-8")
 
-        # gemini の mcp_config.json は変更されていない(存在しない)
+        # gemini's mcp_config.json has not been changed (does not exist)
         gemini_cfg = gemini_dir / "config" / "mcp_config.json"
         assert not gemini_cfg.exists()
 
     def test_agents_none_writes_all_detected(
         self, tmp_path, monkeypatch, patch_which_none, fake_engram_mcp
     ):
-        """agents=None(デフォルト)のとき検出された全エージェントに書き込む。
-        claude は which=None なのでスキップ。codex / gemini は書かれる。"""
+        """With agents=None (default), it writes to all detected agents.
+        claude is skipped because which=None. codex / gemini get written."""
         codex_dir, gemini_dir = self._run_setup(
             tmp_path, monkeypatch, fake_engram_mcp, agents=None
         )
-        # codex が書かれている
+        # codex is written
         codex_cfg = codex_dir / "config.toml"
         assert codex_cfg.is_file()
         assert "[mcp_servers.engram]" in codex_cfg.read_text(encoding="utf-8")
 
-        # gemini が書かれている
+        # gemini is written
         gemini_cfg = gemini_dir / "config" / "mcp_config.json"
         assert gemini_cfg.is_file()
         data = json.loads(gemini_cfg.read_text(encoding="utf-8"))
@@ -634,7 +635,7 @@ class TestSetupMainAgentsFilter:
     def test_agents_gemini_only_writes_gemini_not_codex(
         self, tmp_path, monkeypatch, patch_which_none, fake_engram_mcp
     ):
-        """agents={"gemini"} のとき gemini だけ書かれ codex は変更なし。"""
+        """With agents={"gemini"}, only gemini is written and codex is unchanged."""
         codex_dir, gemini_dir = self._run_setup(
             tmp_path, monkeypatch, fake_engram_mcp, agents={"gemini"}
         )
@@ -642,13 +643,13 @@ class TestSetupMainAgentsFilter:
         assert gemini_cfg.is_file()
 
         codex_cfg = codex_dir / "config.toml"
-        # codex は書かれていないか、engram セクションがない
+        # Either codex was not written, or it has no engram section
         if codex_cfg.exists():
             assert "[mcp_servers.engram]" not in codex_cfg.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
-# doctor の診断ヘルパー(埋め込み実行系・インストール健全性)
+# doctor diagnostic helpers (embedding backend / install health)
 
 
 class TestCheckEmbedBackend:
@@ -718,7 +719,7 @@ class TestFindInstallRemnants:
         (tmp_path / "~ngram").mkdir()
         (tmp_path / "~ngram-0.5.0.dist-info").mkdir()
         (tmp_path / "~-gram").mkdir()
-        (tmp_path / "engram").mkdir()  # 正常な方は引っかからない
+        (tmp_path / "engram").mkdir()  # the normal one is not flagged
         found = find_install_remnants(tmp_path)
         assert "~ngram" in found
         assert "~ngram-0.5.0.dist-info" in found
@@ -732,7 +733,7 @@ class TestFindInstallRemnants:
 
 
 # ---------------------------------------------------------------------------
-# doctor の診断ヘルパー(FTS5/trigram 対応・perf ログ要約)
+# doctor diagnostic helpers (FTS5/trigram support, perf log summary)
 
 
 class TestCheckFts5:
@@ -741,7 +742,7 @@ class TestCheckFts5:
 
         status, detail = check_fts5()
         assert status == "[OK]"
-        assert detail  # sqlite バージョン文字列が入っている
+        assert detail  # contains the sqlite version string
 
 
 class TestSummarizePerf:
@@ -750,7 +751,7 @@ class TestSummarizePerf:
 
         status, detail = summarize_perf(tmp_path / "no_such" / "perf_log.jsonl")
         assert status == "[--]"
-        assert "未記録" in detail
+        assert "not recorded" in detail
 
     def test_median_and_last_preload_are_reported(self, tmp_path):
         from engram.setup import summarize_perf
@@ -760,7 +761,7 @@ class TestSummarizePerf:
             {"ts": 1.0, "kind": "tool", "name": "recall", "ms": 10.0, "ok": True},
             {"ts": 2.0, "kind": "tool", "name": "recall", "ms": 20.0, "ok": True},
             {"ts": 3.0, "kind": "tool", "name": "recall", "ms": 30.0, "ok": True},
-            # 別ツールの記録は recall の中央値に影響しない
+            # A different tool's records don't affect recall's median
             {"ts": 4.0, "kind": "tool", "name": "remember", "ms": 999.0, "ok": True},
             {"ts": 5.0, "kind": "preload", "name": "preload", "ms": 1000.0, "ok": True},
             {"ts": 6.0, "kind": "preload", "name": "preload", "ms": 1850.0, "ok": True},
@@ -771,7 +772,7 @@ class TestSummarizePerf:
         status, detail = summarize_perf(log)
         assert status == "[OK]"
         assert "recall p50 20ms" in detail
-        # 最新の preload エントリ(直近)が使われる
+        # The most recent preload entry is used
         assert "preload 1850ms" in detail
 
     def test_malformed_lines_are_skipped(self, tmp_path):
@@ -781,15 +782,15 @@ class TestSummarizePerf:
         good = {"ts": 1.0, "kind": "tool", "name": "recall", "ms": 40.0, "ok": True}
         lines = [
             "not json at all",
-            json.dumps({"ts": 2.0, "kind": "tool"}),  # ms 欠落
+            json.dumps({"ts": 2.0, "kind": "tool"}),  # missing ms
             json.dumps(good),
-            "",  # 空行
+            "",  # blank line
         ]
         log.write_text("\n".join(lines) + "\n", encoding="utf-8")
         status, detail = summarize_perf(log)
         assert status == "[OK]"
         assert "recall p50 40ms" in detail
-        assert "直近1件" in detail
+        assert "last 1 entries" in detail
 
     def test_no_valid_entries_reports_dashes(self, tmp_path):
         from engram.setup import summarize_perf

@@ -1,7 +1,8 @@
-"""記憶エンジン(担当: Agent B)。db / store / embedder / dynamics を編成する。
+"""Memory engine (owned by: Agent B). Orchestrates db / store / embedder / dynamics.
 
-全メソッドは JSON 化可能な値か models のデータ型を返す。時刻は time.time() を
-使うが、テスト容易性のため now を引数で注入できるようにする(now: float | None)。
+All methods return JSON-serializable values or models data types. Time defaults
+to time.time(), but `now` can be injected as an argument for testability
+(now: float | None).
 """
 
 from __future__ import annotations
@@ -42,30 +43,33 @@ class MemoryEngine:
         room: str | None = None,
         now: float | None = None,
     ) -> dict:
-        """保存。手順:
-        1. content を埋め込み、vector_search(top1, 同 type, tier=hot)で重複検知。
-           cos >= settings.dup_threshold なら新規作成せず、既存記憶に
-           reinforce 相当のイベントを記録して
-           {"id": 既存id, "status": "duplicate_reinforced"} を返す。
-        2. store.create → db.upsert_memory。
-        3. create イベントを dynamics.create_event_weight(importance) の重みで記録
-           (初期符号化ブースト)。
-        4. related_ids へ explicit リンク(db + store 両方。store 側は双方向不要、
-           新規側の frontmatter にのみ記録)。
-        5. tags に "correction" が含まれる場合 importance を
-           max(importance, settings.correction_min_importance) に引き上げる。
-        返り値: {"id", "status": "created", "path"}。
+        """Store a memory. Procedure:
+        1. Embed content and run vector_search(top1, same type, tier=hot) for
+           duplicate detection. If cos >= settings.dup_threshold, skip creating
+           a new memory: record a reinforce-equivalent event on the existing
+           memory instead and return
+           {"id": existing id, "status": "duplicate_reinforced"}.
+        2. store.create -> db.upsert_memory.
+        3. Record a create event with weight dynamics.create_event_weight(importance)
+           (initial encoding boost).
+        4. Add explicit links to related_ids (both db and store; the store side
+           does not need to be bidirectional -- it is recorded only in the new
+           memory's frontmatter).
+        5. If tags contains "correction", raise importance to
+           max(importance, settings.correction_min_importance).
+        Returns: {"id", "status": "created", "path"}.
         """
         ts = now if now is not None else time.time()
         tags = list(tags) if tags else []
         room = room or "common"
 
-        # correction タグがある場合 importance を引き上げる
+        # Raise importance if the correction tag is present
         if "correction" in tags:
             importance = max(importance, self.settings.correction_min_importance)
 
-        # 1. 重複検知: 同タイプ・同部屋・tier=hot で top1 ベクトル検索
-        #    (部屋を跨いだ併合は文脈分離を壊すので同部屋に限定する)
+        # 1. Duplicate detection: top-1 vector search within the same type/room,
+        #    tier=hot (merging across rooms would break context isolation, so we
+        #    restrict this to the same room)
         vec = self.embedder.embed_docs([content])[0]
         candidates = self.db.vector_search(
             vec, 1, tiers=["hot"], types=[type], rooms=[room]
@@ -73,12 +77,12 @@ class MemoryEngine:
         if candidates:
             top_id, top_cos = candidates[0]
             if top_cos >= self.settings.dup_threshold:
-                # 重複とみなし、既存記憶に reinforce イベントを記録
+                # Treat as duplicate: record a reinforce event on the existing memory
                 weight = self.settings.reinforce_weight
                 self.db.add_event(top_id, "reinforce", weight, ts)
                 return {"id": top_id, "status": "duplicate_reinforced"}
 
-        # 2. store.create → db.upsert_memory
+        # 2. store.create -> db.upsert_memory
         record = self.store.create(
             content=content,
             type=type,
@@ -102,19 +106,20 @@ class MemoryEngine:
             room=record.room,
         )
 
-        # 3. create イベントを初期符号化ブーストで記録
+        # 3. Record the create event with the initial encoding boost
         create_weight = dynamics.create_event_weight(
             importance, alpha=self.settings.create_alpha
         )
         self.db.add_event(record.id, "create", create_weight, ts)
 
-        # 4. explicit リンク(db + store)
+        # 4. Explicit links (db + store)
         if related_ids:
             for rel_id in related_ids:
                 self.db.add_link(record.id, rel_id, "explicit", increment=1.0,
                                  max_weight=1.0)
-                # store 側は新規側の frontmatter のみ(双方向不要)
-                # store.create 時に links を渡してあるので追加更新は不要
+                # store side: new memory's frontmatter only (no bidirectional
+                # link needed) -- links were already passed to store.create,
+                # so no further update is needed
 
         return {
             "id": record.id,
@@ -130,60 +135,75 @@ class MemoryEngine:
         mode: str = "fast",        # "fast" | "deep" | "exhaustive"
         limit: int = 5,
         type: str | None = None,
-        room: str | None = None,   # None/"*"=全部屋。指定時は {room, common} に限定
+        room: str | None = None,   # None/"*" = all rooms. If given, restricted to {room, common}
         now: float | None = None,
         record_hits: bool = True,
     ) -> dict:
-        """検索。fast の手順:
-        1. tier=hot(episode は除外。type 指定があればそれを優先)で
-           vector_search top-candidate_k と keyword_search top-candidate_k。
-        2. dynamics.rrf_merge で統合 → 上位 ~candidate_k 件を候補に。
-        3. 候補の relevance はベクトル類似度(FTS のみヒットは候補中の最小類似度を
-           割り当てる)。順位付けには候補内 min-max 正規化後の関連度
-           (dynamics.normalize_relevances、コサイン圧縮対策)を使い、
-           db.get_events で活性度を計算し dynamics.final_score で再ランク。
-           decay は dynamics.decay_rate(importance)。RecallHit.relevance は生値。
-        4. 上位 limit 件を RecallHit で返し、record_hits なら recall_hit イベント
-           (weight=settings.recall_hit_weight)を記録。
-        5. 生値関連度による複合スコアの最高値 < settings.deep_score_threshold なら
-           deep を自動発動して統合し、結果に "auto_deepened": True を付ける
-           (正規化後スコアは候補集合ごとに尺度が動くため、しきい値比較は生値)。
+        """Recall (search). Procedure for fast mode:
+        1. Run vector_search top-candidate_k and keyword_search top-candidate_k
+           with tier=hot (episodes excluded; if a type is given, it takes
+           priority).
+        2. Merge with dynamics.rrf_merge -> take the top ~candidate_k as
+           candidates.
+        3. A candidate's relevance is its vector similarity (FTS-only hits are
+           assigned the minimum similarity among the candidates). Ranking uses
+           relevance after min-max normalization within the candidate set
+           (dynamics.normalize_relevances, to counteract cosine compression);
+           activation is computed via db.get_events and candidates are
+           re-ranked with dynamics.final_score. Decay uses
+           dynamics.decay_rate(importance). RecallHit.relevance holds the raw
+           value.
+        4. Return the top `limit` hits as RecallHit, and if record_hits is set,
+           record a recall_hit event (weight=settings.recall_hit_weight) for
+           each.
+        5. If the highest composite score computed from raw relevance is below
+           settings.deep_score_threshold, auto-trigger deep mode, merge its
+           results in, and mark the response "auto_deepened": True (normalized
+           scores shift scale per candidate set, so threshold comparisons
+           always use raw values).
 
-        deep の追加手順:
-        - tier に cold / superseded、type に episode も含めて 1 をやり直す。
-        - fast 上位をシードに db.get_links(kinds=co_recall/explicit/derived_from)
-          から隣接関数を作り dynamics.spread で拡散。リンク経由のみで到達した
-          記憶は via="associative"。relevance はクエリとの実コサインを別途計算。
-        - superseded の記憶は note に「→ [後継id] により訂正済み」を入れ、
-          後継(superseded_by リンク先)も結果に含める。
+        Additional steps for deep mode:
+        - Redo step 1, also including tier=cold/superseded and type=episode.
+        - Seed dynamics.spread with the fast-mode top hits, building an
+          adjacency function from db.get_links(kinds=co_recall/explicit/
+          derived_from). Memories reached only via links get
+          via="associative"; their relevance is computed separately as the
+          actual cosine similarity against the query.
+        - Superseded memories get a note "→ corrected by [successor id]", and
+          the successor (the superseded_by link target) is also included in
+          the results.
 
-        exhaustive(網羅検索)の手順:
-        - 候補数を絞らず全 tier/type の全記憶について、クエリとのコサイン類似
-          (relevance)のみで順位付けする。活性度は同点時のタイブレークのみ。
-        - 長く使われず沈んだ(活性度の低い)記憶でも意味的に近ければ必ず浮上する。
-        - settings.exhaustive_min_relevance 未満は返さない。deep の最高スコアが
-          settings.exhaustive_score_threshold 未満のときは自動で exhaustive へ
-          エスカレーションする(その場合 mode に "exhaustive" が返る)。
-        返り値: {"hits": [RecallHit を dict 化], "mode", "auto_deepened": bool}。
+        Procedure for exhaustive mode (exhaustive recall):
+        - Rank every memory across all tiers/types purely by cosine similarity
+          to the query (relevance), without narrowing the candidate set.
+          Activation is used only as a tiebreaker for equal relevance.
+        - Even memories that have gone unused for a long time (low activation)
+          will surface as long as they are semantically close.
+        - Memories below settings.exhaustive_min_relevance are never returned.
+          If deep mode's top score is below settings.exhaustive_score_threshold,
+          it auto-escalates to exhaustive (in that case mode returns
+          "exhaustive").
+        Returns: {"hits": [RecallHit as dicts], "mode", "auto_deepened": bool}.
         """
         ts = now if now is not None else time.time()
         auto_deepened = False
 
-        # 部屋フィルタ: 指定された部屋 + 共通(common)だけを見る
+        # Room filter: only look at the specified room plus common
         rooms: list[str] | None = None
         if room is not None and room != "*":
             rooms = sorted({room, "common"})
 
         if mode == "exhaustive":
-            # 明示的な網羅検索: 活性度を無視し関連度のみで全件から拾う
+            # Explicit exhaustive recall: ignore activation, pull from all
+            # memories by relevance only
             hits = self._exhaustive_recall(query, limit=limit, type=type,
                                            rooms=rooms, now=ts)
         else:
-            # fast モードでの検索
+            # Search in fast mode
             hits, best_score = self._fast_recall(query, limit=limit, type=type,
                                                  rooms=rooms, now=ts)
 
-            # 最高スコアが閾値未満なら deep を自動発動
+            # Auto-trigger deep mode if the top score is below the threshold
             if mode == "fast" and best_score < self.settings.deep_score_threshold:
                 mode = "deep"
                 auto_deepened = True
@@ -191,11 +211,14 @@ class MemoryEngine:
             if mode == "deep":
                 hits = self._deep_recall(query, fast_hits=hits, limit=limit,
                                          type=type, rooms=rooms, now=ts)
-                # deep でも最高スコアが弱い=沈んだ記憶や candidate_k の枠外で
-                # 掘りきれていない可能性。関連度のみの網羅検索を試し、より関連度の
-                # 高い結果が得られたときだけ採用する(空振りで結果を劣化させない)。
-                # hit.score は候補内正規化後の値で尺度が動くため、しきい値との
-                # 比較は生値の複合スコアで行う(fast の best_score と同じ流儀)
+                # Even in deep mode, a weak top score may mean the memory has
+                # sunk or lies outside candidate_k's reach. Try relevance-only
+                # exhaustive recall, and only adopt it if it yields a
+                # higher-relevance result (so a fruitless attempt never
+                # degrades the result). hit.score is normalized within the
+                # candidate set and its scale shifts, so the threshold
+                # comparison uses the raw composite score (same convention as
+                # fast mode's best_score)
                 deep_best = max(
                     (dynamics.final_score(
                         h.relevance, h.activation, round(h.importance * 10),
@@ -215,7 +238,7 @@ class MemoryEngine:
                         auto_deepened = True
                         hits = ex_hits
 
-        # recall_hit イベントを記録
+        # Record recall_hit events
         if record_hits:
             for hit in hits:
                 self.db.add_event(hit.id, "recall_hit",
@@ -236,11 +259,11 @@ class MemoryEngine:
         rooms: list[str] | None = None,
         now: float,
     ) -> tuple[list[RecallHit], float]:
-        """fast recall の内部実装。(hits, best_score) を返す。"""
+        """Internal implementation of fast recall. Returns (hits, best_score)."""
         s = self.settings
         k = s.candidate_k
 
-        # episode は fast では除外
+        # Episodes are excluded in fast mode
         if type is not None:
             search_types = [type]
         else:
@@ -248,10 +271,10 @@ class MemoryEngine:
 
         search_tiers = ["hot"]
 
-        # クエリベクトルを生成
+        # Generate the query vector
         qvec = self.embedder.embed_query(query)
 
-        # ベクトル検索 + キーワード検索
+        # Vector search + keyword search
         vec_results = self.db.vector_search(
             qvec, k, tiers=search_tiers, types=search_types, rooms=rooms
         )
@@ -259,31 +282,33 @@ class MemoryEngine:
             query, k, tiers=search_tiers, types=search_types, rooms=rooms
         )
 
-        # ベクトル類似度マップ
+        # Vector similarity map
         vec_sim: dict[str, float] = {id_: sim for id_, sim in vec_results}
-        # FTS スコアマップ(BM25 は小さいほど良いので順位リスト用)
+        # FTS score map (BM25 is lower-is-better, used for the rank list)
         vec_ids = [id_ for id_, _ in vec_results]
         kw_ids = [id_ for id_, _ in kw_results]
 
-        # RRF で統合
+        # Merge with RRF
         merged = dynamics.rrf_merge([vec_ids, kw_ids], k=s.rrf_k)
 
-        # 候補の relevance: ベクトル類似度 + FTS の BM25 順位写像(_hybrid_relevances)
+        # Candidate relevance: vector similarity + FTS's BM25-to-rank mapping
+        # (_hybrid_relevances)
         relevances = _hybrid_relevances(vec_results, kw_results)
-        # 順位付け用に候補内で min-max 正規化(コサイン圧縮対策)。
-        # 生値は RecallHit.relevance とエスカレーション判定に使い続ける。
+        # Min-max normalize within the candidate set for ranking (to
+        # counteract cosine compression). The raw value continues to be used
+        # for RecallHit.relevance and escalation decisions.
         rel_norm = dynamics.normalize_relevances(
             relevances, floor=s.relevance_norm_floor)
 
-        # 活性度を計算して最終スコアで再ランク
+        # Compute activation and re-rank with the final score
         candidate_ids = list(merged.keys())
         events_map = self.db.get_events(candidate_ids)
-        # importance を取得
+        # Fetch importance
         mem_rows = {m["id"]: m for m in self.db.all_memories(
             tiers=search_tiers, types=search_types, rooms=rooms)}
 
         scored: list[tuple[float, str]] = []
-        best_raw_score = 0.0  # deep 自動発動の判定は生値スコアで行う(尺度を変えない)
+        best_raw_score = 0.0  # Deep-mode auto-trigger decisions use the raw score (scale-invariant)
         for id_ in candidate_ids:
             mem = mem_rows.get(id_)
             if mem is None:
@@ -311,7 +336,7 @@ class MemoryEngine:
         scored.sort(reverse=True)
         top = scored[:limit]
 
-        # RecallHit を組み立て(content は path から読む)
+        # Assemble RecallHit (content is read from path)
         hits: list[RecallHit] = []
         for score, id_ in top:
             mem = mem_rows[id_]
@@ -320,7 +345,7 @@ class MemoryEngine:
             act = dynamics.activation_norm(events_map.get(id_, []), now, d,
                                            min_elapsed=s.min_elapsed_seconds)
             rel = relevances[id_]
-            # content を store から取得
+            # Fetch content from the store
             try:
                 rec = self.store.read(Path(mem["path"]))
                 content = rec.content
@@ -357,11 +382,12 @@ class MemoryEngine:
         rooms: list[str] | None = None,
         now: float,
     ) -> list[RecallHit]:
-        """deep recall: tier=cold/superseded・episode も含め再検索 + 拡散活性化。"""
+        """Deep recall: re-search including tier=cold/superseded and episode,
+        plus spreading activation."""
         s = self.settings
         k = s.candidate_k
 
-        # deep は全 tier、全 type を対象(部屋フィルタは維持する)
+        # Deep mode covers all tiers and types (room filter is still applied)
         search_tiers = ["hot", "cold", "superseded"]
         search_types = [type] if type is not None else None
 
@@ -376,15 +402,17 @@ class MemoryEngine:
 
         vec_sim: dict[str, float] = {id_: sim for id_, sim in vec_results}
         min_vec_sim = min(vec_sim.values()) if vec_sim else 0.0
-        # 直接候補の relevance(FTS ヒットの BM25 順位写像込み)
+        # Relevance of direct candidates (including FTS hits' BM25-to-rank mapping)
         relevances = _hybrid_relevances(vec_results, kw_results)
 
         vec_ids = [id_ for id_, _ in vec_results]
         kw_ids = [id_ for id_, _ in kw_results]
         merged = dynamics.rrf_merge([vec_ids, kw_ids], k=s.rrf_k)
 
-        # シード: fast_hits の上位。score は候補内正規化後の値で候補集合ごとに
-        # 尺度が変わるため、拡散の種は生値の複合スコアで組み直す(伝播量を安定させる)
+        # Seeds: the top fast_hits. score is normalized within its candidate
+        # set and its scale shifts per set, so the spreading seeds are
+        # rebuilt from the raw composite score (to keep propagation amounts
+        # stable)
         seed_map: dict[str, float] = {
             h.id: dynamics.final_score(
                 h.relevance, h.activation, round(h.importance * 10),
@@ -395,13 +423,13 @@ class MemoryEngine:
             for h in fast_hits
         }
 
-        # リンクから隣接関数を構築(co_recall/explicit/derived_from)
+        # Build an adjacency function from links (co_recall/explicit/derived_from)
         all_candidate_ids = list(set(list(merged.keys()) + list(seed_map.keys())))
         link_rows = self.db.get_links(
             all_candidate_ids,
             kinds=["co_recall", "explicit", "derived_from"]
         )
-        # 双方向の隣接グラフ
+        # Bidirectional adjacency graph
         adjacency: dict[str, list[tuple[str, float]]] = {}
         for src, dst, kind, weight in link_rows:
             adjacency.setdefault(src, []).append((dst, weight))
@@ -410,19 +438,19 @@ class MemoryEngine:
         def neighbors(id_: str):
             return adjacency.get(id_, [])
 
-        # 拡散活性化
+        # Spreading activation
         spread_scores = dynamics.spread(
             seed_map, neighbors,
             max_hops=s.max_hops,
             hop_decay=s.hop_decay,
         )
 
-        # 全候補 = merged + 拡散で到達したノード
+        # All candidates = merged + nodes reached via spreading
         all_ids = set(merged.keys()) | set(spread_scores.keys())
-        # 直接候補 vs 連想経由を区別
+        # Distinguish direct candidates vs. associative ones
         direct_ids = set(merged.keys())
 
-        # 連想経由ノードの relevance: 実コサインを計算
+        # Relevance of associative-only nodes: compute the actual cosine similarity
         assoc_ids = all_ids - direct_ids
         if assoc_ids:
             emb_map = self.db.get_embeddings(list(assoc_ids))
@@ -430,15 +458,17 @@ class MemoryEngine:
                 cos = float(np.dot(qvec, emb))
                 vec_sim[id_] = max(0.0, cos)
 
-        # 全候補の importance を取得。rooms フィルタ付きなので、拡散活性化で
-        # 他の部屋に到達してもここで弾かれる(連想経由の部屋漏れ防止)
+        # Fetch importance for all candidates. Since the rooms filter is
+        # applied here, any node reached into another room via spreading
+        # activation gets filtered out here (prevents associative leakage
+        # across rooms)
         all_mem_rows = {m["id"]: m for m in self.db.all_memories(
             tiers=search_tiers, types=search_types, rooms=rooms
         )}
 
         events_map = self.db.get_events(list(all_ids))
 
-        # superseded 記憶の後継マップ
+        # Successor map for superseded memories
         superseded_links = self.db.get_links(
             list(all_ids), kinds=["superseded_by"]
         )
@@ -447,11 +477,14 @@ class MemoryEngine:
             if kind == "superseded_by":
                 successor_map[src] = dst
 
-        # 1周目: 全候補の生の関連度を確定する(直接候補は hybrid relevance、
-        # 連想経由は実コサイン。連想経由ノードはクエリとの直接類似が低いからこそ
-        # リンクで辿られている — 強いリンクで繋がっていること自体が関連性の
-        # 証拠なので、拡散活性化の伝播スコアで関連度を底上げする。
-        # これが無いと連想記憶がノイズに埋もれて永久に出てこない)
+        # Pass 1: settle the raw relevance for every candidate (hybrid
+        # relevance for direct candidates, actual cosine for associative
+        # ones). Associative nodes are reached via links precisely because
+        # their direct similarity to the query is low -- being connected by
+        # a strong link is itself evidence of relevance, so we boost their
+        # relevance using the spreading activation propagation score.
+        # Without this, associative memories would be buried in noise and
+        # never surface.)
         rel_map: dict[str, float] = {}
         for id_ in all_ids:
             if all_mem_rows.get(id_) is None:
@@ -461,7 +494,8 @@ class MemoryEngine:
                 rel = max(rel, spread_scores.get(id_, 0.0))
             rel_map[id_] = rel
 
-        # 順位付け用に候補内で min-max 正規化(コサイン圧縮対策。fast と同じ理由)
+        # Min-max normalize within the candidate set for ranking (cosine
+        # compression counter-measure, same reason as fast mode)
         rel_norm = dynamics.normalize_relevances(
             rel_map, floor=s.relevance_norm_floor)
 
@@ -498,10 +532,10 @@ class MemoryEngine:
                 tags = []
                 tier = mem.get("tier", "hot")
 
-            # superseded 記憶には note を付与
+            # Attach a note to superseded memories
             note = ""
             if tier == "superseded" and id_ in successor_map:
-                note = f"→ [{successor_map[id_]}] により訂正済み"
+                note = f"→ corrected by [{successor_map[id_]}]"
 
             hit = RecallHit(
                 id=id_,
@@ -530,17 +564,21 @@ class MemoryEngine:
         rooms: list[str] | None = None,
         now: float,
     ) -> list[RecallHit]:
-        """網羅検索: 活性度を無視し関連度のみで全 tier/type を総当たりする。
+        """Exhaustive recall: brute-force every tier/type, ignoring activation
+        and ranking by relevance alone.
 
-        fast/deep は final_score に活性度が効くため、長く使われず沈んだ記憶は
-        関連が高くても limit の外へ押し出される(「忘れない記憶」なのに想起
-        できない)。ここでは候補数を絞らず全記憶のクエリとのコサイン類似だけで
-        順位付けするので、沈んだ記憶も意味的に近ければ必ず浮上する。
-        部屋フィルタは維持し、settings.exhaustive_min_relevance 未満は返さない。
+        Because fast/deep let activation affect final_score, memories that
+        have gone unused for a long time (low activation) get pushed out
+        past `limit` even when highly relevant -- a memory that is never
+        forgotten but can never be recalled. Here, without narrowing the
+        candidate count, we rank purely by each memory's cosine similarity
+        to the query, so a sunk memory will always surface if it is
+        semantically close. The room filter still applies, and memories
+        below settings.exhaustive_min_relevance are never returned.
         """
         s = self.settings
 
-        # 全 tier・全 type を対象(部屋フィルタは維持する)
+        # Cover all tiers and types (room filter is still applied)
         search_tiers = ["hot", "cold", "superseded"]
         search_types = [type] if type is not None else None
 
@@ -557,7 +595,7 @@ class MemoryEngine:
         emb_map = self.db.get_embeddings(ids)
         events_map = self.db.get_events(ids)
 
-        # superseded 記憶の後継マップ(訂正済み注記用)
+        # Successor map for superseded memories (for the corrected-by note)
         successor_map: dict[str, str] = {}
         for src, dst, kind, _ in self.db.get_links(ids, kinds=["superseded_by"]):
             if kind == "superseded_by":
@@ -577,7 +615,8 @@ class MemoryEngine:
                                            min_elapsed=s.min_elapsed_seconds)
             scored.append((rel, act, id_))
 
-        # 関連度を主、活性度は同点時のタイブレークのみ(沈んでいても拾う)
+        # Rank primarily by relevance; activation is only a tiebreaker for
+        # ties (so sunk memories still get picked up)
         scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
         top = scored[:limit]
 
@@ -597,7 +636,7 @@ class MemoryEngine:
 
             note = ""
             if tier == "superseded" and id_ in successor_map:
-                note = f"→ [{successor_map[id_]}] により訂正済み"
+                note = f"→ corrected by [{successor_map[id_]}]"
 
             hits.append(RecallHit(
                 id=id_,
@@ -605,7 +644,7 @@ class MemoryEngine:
                 type=mem["type"],
                 tags=tags,
                 tier=tier,
-                score=rel,            # 網羅検索の順位基準は関連度そのもの
+                score=rel,            # Exhaustive recall ranks purely by relevance itself
                 relevance=rel,
                 activation=act,
                 importance=imp / 10.0,
@@ -619,16 +658,17 @@ class MemoryEngine:
     # ----------------------------------------------------------------- reinforce
     def reinforce(self, ids: list[str], *, strength: float = 1.0,
                   now: float | None = None) -> dict:
-        """使用報告。各 id に reinforce イベント
-        (weight = settings.reinforce_weight * clamp(strength, 0.1, reinforce_strength_max))。
-        同時に reinforce された id ペア全てに co_recall リンクを
-        increment=settings.colink_increment で強化(ヘッブ則)。
-        存在しない id は無視して結果に "unknown_ids" として列挙。
+        """Report usage. Records a reinforce event for each id
+        (weight = settings.reinforce_weight * clamp(strength, 0.1, reinforce_strength_max)).
+        For every pair of ids reinforced together, strengthens a co_recall
+        link with increment=settings.colink_increment (Hebbian rule).
+        Nonexistent ids are skipped and listed in the result under
+        "unknown_ids".
         """
         ts = now if now is not None else time.time()
         s = self.settings
 
-        # strength をクランプ
+        # Clamp strength
         clamped = max(0.1, min(strength, s.reinforce_strength_max))
         weight = s.reinforce_weight * clamped
 
@@ -642,7 +682,7 @@ class MemoryEngine:
             self.db.add_event(id_, "reinforce", weight, ts)
             reinforced.append(id_)
 
-        # ヘッブ則: 同時に reinforce された ペアに co_recall リンク
+        # Hebbian rule: add a co_recall link for pairs reinforced together
         for i in range(len(reinforced)):
             for j in range(i + 1, len(reinforced)):
                 self.db.add_link(
@@ -664,25 +704,28 @@ class MemoryEngine:
     # ------------------------------------------------------------------- correct
     def correct(self, id: str, corrected_content: str, reason: str, *,
                 source: str = "unknown", now: float | None = None) -> dict:
-        """誤り訂正(ハイパーコレクション効果)。
-        1. 旧記憶を取得(無ければ {"status": "not_found"})。
-        2. 新記憶本文を組み立てる:
+        """Correct an error (the hypercorrection effect).
+        1. Fetch the old memory (return {"status": "not_found"} if it does
+           not exist).
+        2. Assemble the new memory's content:
                {corrected_content}
 
-               > [!note] 訂正の記録
-               > 以前は「{旧本文の先頭200文字}」と誤認していた。
-               > 訂正理由: {reason}
-               > 旧記憶: [[旧id]]
-        3. remember 相当で新規作成。type は旧記憶を継承、
-           importance = max(旧importance, settings.correction_min_importance)、
-           tags は旧 tags + "correction"。重複検知はスキップする。
-        4. 旧記憶: tier=superseded(store+db)、superseded_by リンク(旧→新)。
-        返り値: {"new_id", "old_id", "status": "corrected"}。
+               > [!note] Correction record
+               > Previously misremembered as: "{first 200 chars of the old content}"
+               > Reason for correction: {reason}
+               > Old memory: [[old id]]
+        3. Create it as a new memory, remember-style. Inherits type from the
+           old memory; importance = max(old importance,
+           settings.correction_min_importance); tags = old tags +
+           "correction". Duplicate detection is skipped.
+        4. Old memory: demoted to tier=superseded (store+db), with a
+           superseded_by link (old -> new).
+        Returns: {"new_id", "old_id", "status": "corrected"}.
         """
         ts = now if now is not None else time.time()
         s = self.settings
 
-        # 1. 旧記憶を取得
+        # 1. Fetch the old memory
         old_mem = self.db.get_memory(id)
         if old_mem is None:
             return {"status": "not_found"}
@@ -696,16 +739,16 @@ class MemoryEngine:
         old_content = old_record.content
         old_snippet = old_content[:200]
 
-        # 2. 新記憶本文を組み立て
+        # 2. Assemble the new memory's content
         new_content = (
             f"{corrected_content}\n\n"
-            f"> [!note] 訂正の記録\n"
-            f"> 以前は「{old_snippet}」と誤認していた。\n"
-            f"> 訂正理由: {reason}\n"
-            f"> 旧記憶: [[{id}]]"
+            f"> [!note] Correction record\n"
+            f"> Previously misremembered as: \"{old_snippet}\"\n"
+            f"> Reason for correction: {reason}\n"
+            f"> Old memory: [[{id}]]"
         )
 
-        # 3. 新規記憶作成(重複検知はスキップ: _remember_direct を使う)
+        # 3. Create the new memory (duplicate detection skipped: uses _remember_direct)
         new_importance = max(old_record.importance, s.correction_min_importance)
         new_tags = list(old_record.tags) + ["correction"]
         if "correction" not in new_tags:
@@ -723,11 +766,11 @@ class MemoryEngine:
         )
         new_id = new_result["id"]
 
-        # 4. 旧記憶を superseded に降格
+        # 4. Demote the old memory to superseded
         self.store.set_tier(old_record, "superseded")
         self.db.set_tier(id, "superseded")
 
-        # superseded_by リンク(旧→新)
+        # superseded_by link (old -> new)
         self.db.add_link(id, new_id, "superseded_by", increment=1.0, max_weight=1.0)
 
         return {
@@ -748,7 +791,7 @@ class MemoryEngine:
         room: str = "common",
         now: float,
     ) -> dict:
-        """重複検知をスキップした記憶の直接保存(correct から呼ぶ)。"""
+        """Directly store a memory, bypassing duplicate detection (called from correct)."""
         s = self.settings
         tags = list(tags) if tags else []
 
@@ -795,12 +838,12 @@ class MemoryEngine:
 
     # --------------------------------------------------------------------- misc
     def link(self, src: str, dst: str) -> dict:
-        """explicit リンクを張る(db 両方向ではなく src→dst の1エッジ + store の
-        src frontmatter に追記)。"""
-        # DB にリンクを追加
+        """Create an explicit link (not bidirectional in db -- a single
+        src->dst edge, plus an append to src's frontmatter in the store)."""
+        # Add the link in the DB
         self.db.add_link(src, dst, "explicit", increment=1.0, max_weight=1.0)
 
-        # store の src frontmatter に追記
+        # Append to src's frontmatter in the store
         src_mem = self.db.get_memory(src)
         if src_mem is not None:
             try:
@@ -812,7 +855,8 @@ class MemoryEngine:
         return {"src": src, "dst": dst, "status": "linked"}
 
     def forget(self, id: str) -> dict:
-        """ソフト削除: store.move_to_trash + db では tier=trash(検索対象外)。"""
+        """Soft delete: store.move_to_trash, and tier=trash in the db
+        (excluded from recall)."""
         mem = self.db.get_memory(id)
         if mem is None:
             return {"status": "not_found"}
@@ -820,8 +864,9 @@ class MemoryEngine:
         try:
             record = self.store.read(Path(mem["path"]))
             updated = self.store.move_to_trash(record)
-            # DB の path を移動先へ追随させる。旧パスのままだと以後の
-            # store.read がこの記憶で失敗し、reindex まで自己修復されない
+            # Keep the DB path in sync with the new location. If it kept the
+            # old path, subsequent store.read calls for this memory would
+            # fail and it would stay broken until the next reindex.
             if updated.path is not None:
                 self.db.set_path(id, str(updated.path))
         except Exception:
@@ -838,11 +883,12 @@ class MemoryEngine:
     def _greedy_clusters(
         valid_ids: list[str], emb_map: dict, sim: float, *, min_size: int
     ) -> list[list[str]]:
-        """埋め込みコサイン >= sim の貪欲法クラスタリング。
+        """Greedy clustering by embedding cosine similarity >= sim.
 
-        先頭から順に未使用の id を核にして、コサインが閾値以上の未使用 id を
-        すべて併合する(consolidation_candidates / skill_candidates 共通処理)。
-        min_size 未満のクラスタは捨てる。
+        Walking ids in order, each unused id becomes a new cluster's seed,
+        and every other unused id with cosine similarity at or above the
+        threshold gets merged in (shared logic for consolidation_candidates /
+        skill_candidates). Clusters smaller than min_size are discarded.
         """
         used = set()
         clusters: list[list[str]] = []
@@ -867,7 +913,7 @@ class MemoryEngine:
     def _clusters_with_contents(
         self, clusters: list[list[str]], mem_rows: dict
     ) -> list[dict]:
-        """各クラスタの id 群から本文(content)を取得し、返却形式に整形する。"""
+        """Fetch the content for each cluster's ids and format it into the return shape."""
         result_clusters = []
         for cluster_ids in clusters:
             contents = []
@@ -884,19 +930,21 @@ class MemoryEngine:
         return result_clusters
 
     def consolidation_candidates(self, *, now: float | None = None) -> dict:
-        """tier=hot で settings.consolidate_min_age_days より古い episode を取得し、
-        埋め込みコサイン >= settings.consolidate_cluster_sim の貪欲法でクラスタ化。
-        2件以上のクラスタのみ {"clusters": [{"ids": [...], "contents": [...]}]} で返す。
-        要約自体は呼び出し元エージェント(LLM)が行う — サーバーは LLM を持たない。
+        """Fetch tier=hot episodes older than settings.consolidate_min_age_days
+        and greedily cluster them by embedding cosine similarity >=
+        settings.consolidate_cluster_sim. Returns only clusters of 2 or more
+        as {"clusters": [{"ids": [...], "contents": [...]}]}.
+        The summarization itself is done by the calling agent (LLM) -- the
+        server has no LLM of its own.
         """
         ts = now if now is not None else time.time()
         s = self.settings
         min_age_seconds = s.consolidate_min_age_days * 86400.0
 
-        # tier=hot、type=episode の記憶を取得
+        # Fetch tier=hot, type=episode memories
         all_mems = self.db.all_memories(tiers=["hot"], types=["episode"])
 
-        # 古いものだけ絞る
+        # Narrow down to only the old ones
         old_ids = []
         for mem in all_mems:
             age = ts - mem.get("created_at", ts)
@@ -906,9 +954,9 @@ class MemoryEngine:
         if not old_ids:
             return {"clusters": []}
 
-        # 埋め込みを取得してクラスタリング
+        # Fetch embeddings and cluster
         emb_map = self.db.get_embeddings(old_ids)
-        # emb_map に含まれる id のみ有効
+        # Only ids present in emb_map are valid
         valid_ids = [id_ for id_ in old_ids if id_ in emb_map]
 
         if len(valid_ids) < 2:
@@ -918,40 +966,46 @@ class MemoryEngine:
             valid_ids, emb_map, s.consolidate_cluster_sim, min_size=2
         )
 
-        # 各クラスタの contents を取得
+        # Fetch each cluster's contents
         mem_rows = {m["id"]: m for m in all_mems}
         result_clusters = self._clusters_with_contents(clusters, mem_rows)
 
         return {"clusters": result_clusters}
 
     def skill_candidates(self, *, now: float | None = None) -> dict:
-        """同じ形の作業を記録した episode の「スキル化候補」クラスタを返す。
+        """Return "skill candidate" clusters of episodes that recorded work
+        of the same shape.
 
-        consolidation_candidates(統合候補)との違い:
-        - 年齢フィルタなし: 直近の繰り返し作業こそスキル化提案の対象であり、
-          consolidate_min_age_days のように「古くなるまで待つ」必要がない。
-        - クラスタの最小件数は settings.skill_min_count(既定3、三度ルール)。
-          統合(要約による圧縮)の目的である 2 件クラスタとは異なり、単発〜
-          偶然の一致をスキル化提案してノイズにしないため、より厳しい下限を
-          設ける。
-        - 目的は要約(記憶の圧縮)ではなく、手順書としての切り出し(スキル化)
-          をユーザーへ提案する判断材料の提示。作成自体は行わない。
+        Differences from consolidation_candidates (consolidation candidates):
+        - No age filter: recent, repeated work is exactly what should be
+          proposed for skill extraction -- unlike consolidate_min_age_days,
+          there is no need to "wait until it's old."
+        - The minimum cluster size is settings.skill_min_count (default 3,
+          the "rule of three"). Unlike the 2-item clusters used for
+          consolidation (compression via summarization), a stricter floor is
+          used here so that one-off or coincidental matches don't get
+          proposed as skills and turn into noise.
+        - The goal is not summarization (memory compression) but surfacing
+          material for proposing that the work be extracted into a
+          procedure (a skill) to the user. It does not create the skill
+          itself.
 
-        返り値は consolidation_candidates と同形:
+        Returns the same shape as consolidation_candidates:
         {"clusters": [{"ids": [...], "contents": [...]}]}
         """
-        # now は年齢フィルタが無いため使わないが、consolidation_candidates と
-        # 同じ呼び出し形(テストからの now 注入)を揃えるために引数だけ残す。
+        # now is unused since there is no age filter, but the parameter is
+        # kept so the call signature matches consolidation_candidates (for
+        # now-injection from tests).
         s = self.settings
 
-        # tier=hot、type=episode の記憶を取得(年齢フィルタなし)
+        # Fetch tier=hot, type=episode memories (no age filter)
         all_mems = self.db.all_memories(tiers=["hot"], types=["episode"])
         all_ids = [mem["id"] for mem in all_mems]
 
         if not all_ids:
             return {"clusters": []}
 
-        # 埋め込みを取得してクラスタリング
+        # Fetch embeddings and cluster
         emb_map = self.db.get_embeddings(all_ids)
         valid_ids = [id_ for id_ in all_ids if id_ in emb_map]
 
@@ -968,17 +1022,17 @@ class MemoryEngine:
         return {"clusters": result_clusters}
 
     def mark_consolidated(self, episode_ids: list[str], new_memory_id: str) -> dict:
-        """統合完了処理: 各 episode に derived_from リンク(episode→new)を張り、
-        tier=cold に降格。"""
+        """Mark consolidation complete: add a derived_from link
+        (episode -> new) for each episode and demote it to tier=cold."""
         updated = []
         for ep_id in episode_ids:
             mem = self.db.get_memory(ep_id)
             if mem is None:
                 continue
-            # derived_from リンク(episode→new)
+            # derived_from link (episode -> new)
             self.db.add_link(ep_id, new_memory_id, "derived_from",
                              increment=1.0, max_weight=1.0)
-            # tier=cold に降格
+            # Demote to tier=cold
             self.db.set_tier(ep_id, "cold")
             try:
                 rec = self.store.read(Path(mem["path"]))
@@ -995,23 +1049,26 @@ class MemoryEngine:
 
     # ------------------------------------------------------------------- reindex
     def reindex(self) -> dict:
-        """Markdown 正本から DB を突き合わせて再構築:
-        - store.scan_all() の各記録について content_hash を DB と比較、
-          差異(手編集)や未登録は再埋め込みして upsert。
-        - DB にあるがファイルが消えた id は delete_memory。
-        - 件数を {"added", "updated", "removed", "unchanged"} で返す。
+        """Rebuild the DB against the canonical Markdown source:
+        - For each record from store.scan_all(), compare content_hash
+          against the DB; re-embed and upsert anything that differs (manual
+          edits) or is not yet registered.
+        - delete_memory for any id that exists in the DB but whose file has
+          vanished.
+        - Returns counts as {"added", "updated", "removed", "unchanged"}.
         """
         added = 0
         updated = 0
         unchanged = 0
 
-        # store からファイル全走査
+        # Full scan of files from the store
         seen_ids: set[str] = set()
         for record in self.store.scan_all():
             seen_ids.add(record.id)
             db_mem = self.db.get_memory(record.id)
             if db_mem is None:
-                # 未登録: 埋め込んで upsert。created_at は正本 frontmatter から復元
+                # Not yet registered: embed and upsert. created_at is
+                # restored from the canonical frontmatter
                 vec = self.embedder.embed_docs([record.content])[0]
                 created_at = _created_to_epoch(record.created)
                 self.db.upsert_memory(
@@ -1026,8 +1083,9 @@ class MemoryEngine:
                     embedding=vec,
                     room=record.room,
                 )
-                # イベントが無い(=ゼロから再構築した)場合は create イベントを
-                # 再シードする。これが無いと再構築後の活性度が全件 0 になる
+                # If there are no events (i.e. this was rebuilt from
+                # scratch), reseed a create event. Without this, activation
+                # would be 0 for every memory after the rebuild.
                 if not self.db.get_events([record.id]).get(record.id):
                     self.db.add_event(
                         record.id,
@@ -1040,7 +1098,7 @@ class MemoryEngine:
                 added += 1
             elif (db_mem.get("content_hash", "") != record.content_hash
                   or db_mem.get("room", "common") != record.room):
-                # 手編集で差異あり(本文または room): 再埋め込みして upsert
+                # Diverges due to a manual edit (content or room): re-embed and upsert
                 vec = self.embedder.embed_docs([record.content])[0]
                 self.db.upsert_memory(
                     id=record.id,
@@ -1058,7 +1116,7 @@ class MemoryEngine:
             else:
                 unchanged += 1
 
-        # DB にあるがファイルが消えた id を削除
+        # Delete ids that exist in the DB but whose file has vanished
         all_db_ids = {m["id"] for m in self.db.all_memories()}
         orphans = all_db_ids - seen_ids
         for orphan_id in orphans:
@@ -1074,17 +1132,21 @@ class MemoryEngine:
 
     # ------------------------------------------------ startup index freshness
     def check_index_freshness(self, *, mode: str = "auto") -> dict:
-        """起動時のインデックス同期チェック(マルチマシン共有対策)。
+        """Startup index-freshness check (guards against multi-machine
+        sharing gaps).
 
-        記憶 Markdown は共有(例: Google Drive)でも index.db はマシンごとローカルな
-        ため、他マシンが書いた記憶が index に無く recall に一切出ない盲点が生じる。
-        Markdown(非trash)のファイル数と index の active(hot/cold/superseded)件数を
-        比較し、乖離があれば:
-          - mode="auto": reindex して同期する
-          - mode="warn": 警告情報を返す(呼び出し側がログ出力。書き込みはしない)
-          - mode="off" : 何もしない
-        返り値: {"action", "markdown", "index", ...}。action は
-        "off"/"in_sync"/"warn"/"reindexed"。
+        The memory Markdown may be shared (e.g. via Google Drive) while
+        index.db stays local to each machine, creating a blind spot where
+        memories written on another machine are missing from the index and
+        never surface in recall. Compares the Markdown (non-trash) file
+        count against the index's active (hot/cold/superseded) count, and if
+        they diverge:
+          - mode="auto": reindex to resync
+          - mode="warn": return warning info (the caller logs it; nothing is
+            written)
+          - mode="off" : do nothing
+        Returns: {"action", "markdown", "index", ...}. action is one of
+        "off"/"in_sync"/"warn"/"reindexed".
         """
         if mode == "off":
             return {"action": "off"}
@@ -1095,12 +1157,13 @@ class MemoryEngine:
         ))
 
         if md_count == idx_count:
-            # 速い経路: raw .md 件数が一致すれば同期済みとみなし、走査しない
+            # Fast path: if the raw .md count matches, treat it as in sync and skip scanning
             return {"action": "in_sync", "markdown": md_count, "index": idx_count}
 
-        # 件数が違う。空ファイル・壊れた frontmatter・id 無しの非記憶 .md による
-        # 見かけ上のズレかもしれない(scan_all はそれらをスキップする)。無駄な
-        # reindex を避けるため、index と同じ「有効な記憶」母集団で正確に数え直す。
+        # Counts differ. This might just be an apparent mismatch caused by
+        # empty files, broken frontmatter, or non-memory .md files without an
+        # id (scan_all skips those). To avoid a wasted reindex, recount
+        # precisely over the same "valid memory" population the index uses.
         valid_count = sum(1 for _ in self.store.scan_all())
         if valid_count == idx_count:
             return {
@@ -1108,7 +1171,7 @@ class MemoryEngine:
                 "markdown": md_count,
                 "index": idx_count,
                 "valid": valid_count,
-                "note": "raw .md 件数差は空/壊れた/非記憶 md による見かけ上のもの",
+                "note": "The raw .md count difference is only apparent, caused by empty/broken/non-memory md files",
             }
 
         if mode == "warn":
@@ -1120,7 +1183,7 @@ class MemoryEngine:
                 "drift": valid_count - idx_count,
             }
 
-        # auto: reindex して同期(他マシンの未取り込み記憶を index へ取り込む)
+        # auto: reindex to resync (pulls in memories from other machines not yet in the index)
         reindex_result = self.reindex()
         return {
             "action": "reindexed",
@@ -1135,22 +1198,30 @@ def _hybrid_relevances(
     vec_results: list[tuple[str, float]],
     kw_results: list[tuple[str, float]],
 ) -> dict[str, float]:
-    """RRF 候補の relevance を組み立てる(ハイブリッド検索の要)。
+    """Build the relevance for RRF candidates (the crux of hybrid search).
 
-    ベクトルでヒットした候補はコサイン類似度、FTS でヒットした候補は BM25 を
-    (0,1) の絶対スケールへ写した字句関連度とし、両方あるものは大きい方を採る。
+    For candidates that matched via the vector search, relevance is cosine
+    similarity; for candidates that matched via FTS, it's a lexical relevance
+    that maps BM25 onto an absolute (0,1) scale. When a candidate matched on
+    both, whichever is larger wins.
 
-    かつては FTS のみのヒットに一律 min_vec_sim(ベクトル候補中の最小類似度)を
-    与えていたが、それだと ID・ファイルパス・固有名詞の完全一致(ベクトルが
-    苦手で FTS が得意な領域)が候補中最下位に沈み、表に出られなかった。
-    さらに Ruri のコサインは 0.8〜0.87 に圧縮されがちで、ベクトル値域への
-    順位写像では字句一致の決定的な証拠を表現しきれない(実データで確認)。
+    An earlier version gave a single min_vec_sim (the lowest similarity among
+    the vector candidates) to every FTS-only hit, but that meant exact
+    matches on IDs, file paths, or proper nouns -- a case vectors are weak at
+    and FTS excels at -- always sank to the bottom of the candidates and
+    never surfaced. On top of that, embedding cosine similarity tends to
+    compress into a narrow band (e.g. Ruri, the Japanese-oriented embedding
+    option, was observed compressing to roughly 0.8-0.87), and mapping BM25
+    rank onto that narrow vector range could not fully express decisive
+    lexical-match evidence (confirmed on real data).
 
-    BM25 は語の希少性(IDF)を符号化しているのでそれを絶対スケールに使う:
-        lex = 1 - exp(bm25_sqlite)      # sqlite の bm25() は負値・小さいほど良い
-    希少トークンの完全一致(bm25 ≒ -6)は 0.997、ありふれた語の一致
-    (bm25 ≒ -0.5)は 0.39 になり、決定的な字句一致だけがコサインの
-    天井(〜0.87)を越えて浮上する。一般語のヒットはベクトル候補に劣後する。
+    BM25 encodes term rarity (IDF), so we use that directly on an absolute
+    scale:
+        lex = 1 - exp(bm25_sqlite)      # sqlite's bm25() is negative, lower is better
+    An exact match on a rare token (bm25 ~ -6) becomes 0.997, while a match on
+    a common word (bm25 ~ -0.5) becomes 0.39 -- so only decisive lexical
+    matches rise above the vector similarity ceiling (~0.87), while
+    common-word hits still lose out to vector candidates.
     """
     relevances = {id_: sim for id_, sim in vec_results}
     for id_, bm25 in kw_results:
@@ -1161,8 +1232,9 @@ def _hybrid_relevances(
 
 def build_engine(settings: Settings | None = None, *, embedder: Embedder | None = None
                  ) -> MemoryEngine:
-    """既定構成でエンジンを組み立てるファクトリ(server / cli から使う)。
-    embedder 未指定なら settings.embed_backend に従って選択(embedder.make_embedder)。"""
+    """Factory that assembles an engine with the default configuration (used
+    by server / cli). If embedder is not given, it is selected according to
+    settings.embed_backend (embedder.make_embedder)."""
     if settings is None:
         settings = get_settings()
 
@@ -1171,17 +1243,19 @@ def build_engine(settings: Settings | None = None, *, embedder: Embedder | None 
         embedder = make_embedder(settings)
 
     store = MarkdownStore(settings.memories_dir)
-    # 次元は必ず実モデルから取得する(推定が外れると DB のベクトル表が
-    # 誤った次元で固定され、以後の全埋め込みが壊れる)。ONNX 経路は meta.json
-    # から即答するのでここでのモデルロードは走らない。torch 経路(RuriEmbedder)
-    # は初回ロードがここで走るが、stdio サーバーは常駐なので一度きり。
+    # Always get the dimension from the actual model (if a guess is wrong,
+    # the DB's vector table gets fixed at the wrong dimension and every
+    # embedding from then on breaks). The ONNX path answers instantly from
+    # meta.json, so no model load happens here. The torch path (RuriEmbedder)
+    # does its first load here, but since the stdio server is long-running,
+    # that only happens once.
     db = IndexDB(settings.db_path, embedder.dim)
 
     return MemoryEngine(settings=settings, store=store, db=db, embedder=embedder)
 
 
 def _created_to_epoch(created: str) -> float:
-    """frontmatter の created(ISO 8601)を unix 秒へ。壊れていれば現在時刻。"""
+    """Convert frontmatter's created (ISO 8601) to Unix seconds. Falls back to the current time if malformed."""
     from datetime import datetime
 
     try:
@@ -1191,7 +1265,7 @@ def _created_to_epoch(created: str) -> float:
 
 
 def _hit_to_dict(hit: RecallHit) -> dict:
-    """RecallHit を JSON 化可能な dict に変換。"""
+    """Convert a RecallHit into a JSON-serializable dict."""
     return {
         "id": hit.id,
         "content": hit.content,

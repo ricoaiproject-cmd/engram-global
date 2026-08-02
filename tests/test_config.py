@@ -1,4 +1,4 @@
-"""設定の読み込み優先順位(既定値 < config.toml < 環境変数)のテスト。"""
+"""Tests for the settings load priority (defaults < config.toml < environment variables)."""
 
 from pathlib import Path
 
@@ -42,7 +42,7 @@ def test_broken_config_file_does_not_crash(monkeypatch, tmp_path):
     monkeypatch.delenv("ENGRAM_MEMORIES_DIR", raising=False)
     (tmp_path / "config.toml").write_text("this is [not toml", encoding="utf-8")
     s = cfg.get_settings()
-    assert s.memories_dir == tmp_path / "memories"  # 既定値で動く
+    assert s.memories_dir == tmp_path / "memories"  # falls back to defaults
 
 
 def test_templates_shipped_in_package():

@@ -1,14 +1,15 @@
-"""Markdown 正本ストア(担当: Agent A)。
+"""Markdown source-of-truth store (owner: Agent A).
 
-1記憶 = 1ファイル(Zettelkasten 式に原子的)。Obsidian でそのまま閲覧・編集できる。
+1 memory = 1 file (atomic, Zettelkasten-style). Viewable and editable directly in
+Obsidian.
 
-配置:
+Layout:
     memories/knowledge/   memories/preferences/   memories/projects/
     memories/episodes/YYYY/MM/    memories/_trash/
-type → サブディレクトリ対応: knowledge→knowledge, preference→preferences,
-project→projects, episode→episodes/YYYY/MM(created 由来)。
+type → subdirectory mapping: knowledge→knowledge, preference→preferences,
+project→projects, episode→episodes/YYYY/MM (derived from created).
 
-ファイル形式(python-frontmatter で読み書き):
+File format (read/written via python-frontmatter):
     ---
     id: 01JXXXX...            # ULID
     type: knowledge
@@ -17,21 +18,25 @@ project→projects, episode→episodes/YYYY/MM(created 由来)。
     importance: 7
     source: claude-code
     tier: hot
-    links: ["[[01JYYY...]]"]   # Obsidian wiki-link 形式で保存
+    links: ["[[01JYYY...]]"]   # stored in Obsidian wiki-link format
     ---
-    本文(プレーン Markdown)
+    body (plain Markdown)
 
-実装要件:
-- ファイル名: YYYYMMDD-{slug}-{idの末尾6文字}.md
-  slug = 本文先頭行から生成(最大40文字、Windows 禁止文字 <>:"/\\|?* と改行を除去、
-  空白は '-' に。日本語はそのまま可)。
-- links は frontmatter 上は "[[id]]" 文字列、MemoryRecord.links 上は素の id リスト。
-  読み書きで相互変換する。
-- content_hash = 本文(frontmatter 除く、strip 後)の sha256 hex。
-- tier 変更や本文更新はファイルを書き換える。episode 以外のディレクトリ移動は
-  伴わない(tier は frontmatter のみ)。forget は _trash/ へファイル移動。
-- scan_all() は _trash を除く全 .md を MemoryRecord で yield(reindex 用)。
-- frontmatter が壊れたファイルは警告として収集しスキップ(例外で落とさない)。
+Implementation requirements:
+- Filename: YYYYMMDD-{slug}-{last 6 chars of id}.md
+  slug = generated from the first line of the body (max 40 chars, with Windows
+  forbidden chars <>:"/\\|?* and newlines stripped, spaces replaced with '-'.
+  Japanese text is left as-is).
+- links are stored in frontmatter as "[[id]]" strings, but as a plain list of
+  ids on MemoryRecord.links. Converted both ways on read/write.
+- content_hash = sha256 hex of the body (frontmatter excluded, after strip).
+- Tier changes and body updates rewrite the file in place. Only episodes
+  involve a directory move (tier lives purely in frontmatter). forget moves
+  the file to _trash/.
+- scan_all() yields every .md file except those under _trash as a
+  MemoryRecord (used for reindex).
+- Files with broken frontmatter are collected as warnings and skipped
+  (never raises).
 """
 
 from __future__ import annotations
@@ -63,13 +68,13 @@ _TYPE_TO_DIR: dict[str, str] = {
 
 
 def content_hash(content: str) -> str:
-    """本文の正規化ハッシュ(strip 後 sha256 hex)。"""
+    """Normalized hash of the body (sha256 hex after strip)."""
     normalized = content.strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _make_slug(content: str) -> str:
-    """本文先頭行から slug を生成。"""
+    """Generate a slug from the first line of the body."""
     first_line = content.strip().splitlines()[0] if content.strip() else ""
     # Remove Windows forbidden chars and control chars
     slug = _WIN_FORBIDDEN.sub("", first_line)
@@ -84,7 +89,7 @@ def _make_slug(content: str) -> str:
 
 
 def _parse_created_date(created: str) -> datetime:
-    """ISO 8601 文字列から datetime を返す。"""
+    """Return a datetime parsed from an ISO 8601 string."""
     # Handle timezone offset like +09:00
     try:
         # Python 3.7+ fromisoformat handles most cases but not all timezone formats
@@ -94,12 +99,12 @@ def _parse_created_date(created: str) -> datetime:
 
 
 def _links_to_frontmatter(links: list[str]) -> list[str]:
-    """素の id リスト → "[[id]]" 形式のリスト。"""
+    """Convert a plain list of ids → a list of "[[id]]" strings."""
     return [f"[[{lid}]]" for lid in links]
 
 
 def _links_from_frontmatter(raw: list | None) -> list[str]:
-    """frontmatter の links → 素の id リスト("[[id]]" を剥がす)。"""
+    """Convert frontmatter links → a plain list of ids (strips "[[id]]")."""
     if not raw:
         return []
     result = []
@@ -113,7 +118,7 @@ def _links_from_frontmatter(raw: list | None) -> list[str]:
 
 
 def _subdir_for_type(root: Path, type: str, created: str) -> Path:
-    """type と created から保存先ディレクトリを決定。"""
+    """Determine the destination directory from type and created."""
     if type == "episode":
         dt = _parse_created_date(created)
         return root / "episodes" / dt.strftime("%Y") / dt.strftime("%m")
@@ -121,7 +126,7 @@ def _subdir_for_type(root: Path, type: str, created: str) -> Path:
 
 
 def _filename_from_record(id: str, type: str, created: str, content: str) -> str:
-    """YYYYMMDD-{slug}-{id末尾6文字}.md"""
+    """YYYYMMDD-{slug}-{last 6 chars of id}.md"""
     dt = _parse_created_date(created)
     date_str = dt.strftime("%Y%m%d")
     slug = _make_slug(content)
@@ -131,7 +136,7 @@ def _filename_from_record(id: str, type: str, created: str, content: str) -> str
 
 class MarkdownStore:
     def __init__(self, root: Path) -> None:
-        """root = memories ディレクトリ。無ければサブディレクトリごと作成。"""
+        """root = the memories directory. Created along with its subdirectories if missing."""
         self._root = Path(root)
         # Create all standard subdirectories
         for subdir in ("knowledge", "preferences", "projects", "_trash"):
@@ -140,7 +145,7 @@ class MarkdownStore:
         (self._root / "episodes").mkdir(parents=True, exist_ok=True)
 
     def _write_record(self, record: MemoryRecord) -> None:
-        """MemoryRecord をファイルに書き出す。"""
+        """Write a MemoryRecord out to a file."""
         post = frontmatter.Post(
             content=record.content,
             id=record.id,
@@ -171,7 +176,7 @@ class MarkdownStore:
         created: str | None = None,
         room: str = "common",
     ) -> MemoryRecord:
-        """新規記憶ファイルを書き、MemoryRecord を返す。"""
+        """Write a new memory file and return the MemoryRecord."""
         from ulid import ULID
 
         if id is None:
@@ -222,14 +227,14 @@ class MarkdownStore:
         )
 
     def find_by_id(self, id: str) -> MemoryRecord | None:
-        """全走査せず、まず DB 側の path を使うのが本筋。store 単体では全走査でよい。"""
+        """The proper approach is to use the DB's path rather than a full scan; a full scan is fine when using the store alone."""
         for record in self.scan_all():
             if record.id == id:
                 return record
         return None
 
     def update(self, record: MemoryRecord) -> MemoryRecord:
-        """record.path のファイルを record の内容で書き直す(content_hash 再計算)。"""
+        """Rewrite the file at record.path with record's content (recomputes content_hash)."""
         updated = MemoryRecord(
             id=record.id,
             type=record.type,
@@ -248,7 +253,7 @@ class MarkdownStore:
         return updated
 
     def add_link(self, record: MemoryRecord, target_id: str) -> MemoryRecord:
-        """links に target_id を追加(重複は無視)してファイル更新。"""
+        """Add target_id to links (ignoring duplicates) and update the file."""
         if target_id in record.links:
             return record
         updated = MemoryRecord(
@@ -287,7 +292,7 @@ class MarkdownStore:
         return updated
 
     def move_to_trash(self, record: MemoryRecord) -> MemoryRecord:
-        """_trash/ へ移動し tier=trash に。物理削除はしない。"""
+        """Move to _trash/ and set tier=trash. Never physically deletes the file."""
         trash_dir = self._root / "_trash"
         trash_dir.mkdir(parents=True, exist_ok=True)
         assert record.path is not None
@@ -316,8 +321,8 @@ class MarkdownStore:
         return updated
 
     def scan_all(self) -> Iterator[MemoryRecord]:
-        """_trash を除く全 .md を MemoryRecord で yield(reindex 用)。
-        frontmatter が壊れたファイルは警告としてスキップ。
+        """Yield every .md file except those under _trash as a MemoryRecord (used for reindex).
+        Files with broken frontmatter are skipped with a warning.
         """
         trash_dir = self._root / "_trash"
         for md_file in self._root.rglob("*.md"):
@@ -339,9 +344,9 @@ class MarkdownStore:
                 continue
 
     def count_memory_files(self) -> int:
-        """_trash を除く .md ファイル数を軽量カウントする(frontmatter は読まない)。
+        """Lightweight count of .md files excluding _trash (does not parse frontmatter).
 
-        起動時のインデックス同期チェック用。scan_all と同じく _trash 配下は除外する。
+        Used for the startup index-sync check. Excludes _trash the same way as scan_all.
         """
         trash_dir = self._root / "_trash"
         count = 0

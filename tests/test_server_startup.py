@@ -1,11 +1,12 @@
-"""MCP サーバー起動の回帰テスト。
+"""Regression tests for MCP server startup.
 
-守っているのは「起動タイムアウト」クラスの事故(2026-07-02〜03 に実際に発生):
-- initialize ハンドシェイクが重い import に巻き込まれて数十秒ブロックする
-- server モジュールの import 時点で torch 等の重量級が読み込まれてしまう
+These guard against the "startup timeout" class of incident (which actually
+occurred on 2026-07-02 through 03):
+- the initialize handshake gets dragged into a heavy import and blocks for tens of seconds
+- heavyweight modules such as torch get loaded merely by importing the server module
 
-どちらも実モデル不要で検証できる(ENGRAM_PRELOAD=off ならエンジン構築なしで
-ハンドシェイクが返る設計)。
+Both can be verified without a real model (by design, with ENGRAM_PRELOAD=off the
+handshake returns without building the engine).
 """
 
 from __future__ import annotations
@@ -20,8 +21,8 @@ from pathlib import Path
 
 SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
 
-# ハンドシェイクは本来 2〜3 秒。CI ランナーの遅さを見込んでも 15 秒あれば
-# 十分で、これを超えるのは「重い import がハンドシェイクを塞ぐ」回帰。
+# The handshake normally takes 2-3 seconds. Even allowing for a slow CI runner,
+# 15 seconds is plenty; exceeding it means a regression where a heavy import blocks the handshake.
 HANDSHAKE_DEADLINE_SECONDS = 15
 
 
@@ -40,7 +41,7 @@ def _spawn_server(tmp_path: Path) -> subprocess.Popen:
 
 
 def test_initialize_handshake_is_fast(tmp_path):
-    """initialize が数秒で応答する(重い import に塞がれない)こと。"""
+    """initialize should respond within a few seconds (not blocked by a heavy import)."""
     proc = _spawn_server(tmp_path)
     try:
         request = {
@@ -56,8 +57,8 @@ def test_initialize_handshake_is_fast(tmp_path):
         proc.stdin.write((json.dumps(request) + "\n").encode())
         proc.stdin.flush()
 
-        # ハングしたサーバーで readline がテストごと固まらないよう、
-        # 読み取りはスレッドに逃がして deadline で待つ
+        # Push the read into a thread and wait on a deadline, so that readline hanging
+        # on a stuck server doesn't freeze the whole test
         lines: queue.Queue = queue.Queue()
 
         def _reader():
@@ -94,10 +95,10 @@ def test_initialize_handshake_is_fast(tmp_path):
 
 
 def test_server_import_stays_light():
-    """engram.server の import だけでは重量級モジュールを読み込まないこと。
+    """Importing engram.server alone must not pull in heavyweight modules.
 
-    torch / sentence_transformers は言うまでもなく、onnxruntime も遅延ロード
-    (初回 embed 時)に保つ。ここが崩れると全クライアントの起動が遅くなる。
+    Not just torch / sentence_transformers -- onnxruntime too must stay lazily
+    loaded (on the first embed call). If this regresses, every client's startup slows down.
     """
     code = (
         "import sys\n"

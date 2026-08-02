@@ -1,9 +1,10 @@
-"""ONNX 埋め込み実行系のテスト(実モデル不使用)。
+"""Tests for the ONNX embedding runtime (no real model used).
 
-- mean_pool_normalize: torch 経路と同一のプーリング計算(純関数)の性質を検証
-- make_embedder: embed_backend の選択ロジックを tmp_path Settings で検証
-  (RuriEmbedder は isinstance 確認のみ。embed は呼ばない = モデルDLなし)
-- ENGRAM_EMBED_BACKEND 環境変数が get_settings に届くことを検証
+- mean_pool_normalize: verifies the properties of the pure-function pooling computation,
+  identical to the torch path
+- make_embedder: verifies the embed_backend selection logic with a tmp_path Settings
+  (RuriEmbedder is only checked via isinstance; embed is never called = no model download)
+- Verifies that the ENGRAM_EMBED_BACKEND environment variable reaches get_settings
 """
 
 from __future__ import annotations
@@ -24,15 +25,15 @@ from engram.embedder import (
 
 
 # ---------------------------------------------------------------------------
-# mean_pool_normalize(純関数)
+# mean_pool_normalize (pure function)
 # ---------------------------------------------------------------------------
 
 class TestMeanPoolNormalize:
     def test_masked_mean_hand_computed(self):
-        """マスク=1 のトークンだけの平均になること(手計算例)。
+        """Only tokens with mask=1 should be averaged (hand-computed example).
 
-        hidden: (1, 3, 2)、mask=[1,1,0] → 3番目のトークンは無視され、
-        平均は ([1,2] + [3,4]) / 2 = [2,3]。L2 正規化して [2,3]/sqrt(13)。
+        hidden: (1, 3, 2), mask=[1,1,0] -> the 3rd token is ignored,
+        so the average is ([1,2] + [3,4]) / 2 = [2,3]. L2-normalized this is [2,3]/sqrt(13).
         """
         hidden = np.array([[[1.0, 2.0], [3.0, 4.0], [100.0, 100.0]]])
         mask = np.array([[1, 1, 0]])
@@ -44,13 +45,13 @@ class TestMeanPoolNormalize:
         rng = np.random.default_rng(42)
         hidden = rng.normal(size=(4, 7, 16)).astype(np.float32)
         mask = np.ones((4, 7), dtype=np.int64)
-        mask[2, 4:] = 0  # 一部パディングあり
+        mask[2, 4:] = 0  # some padding present
         out = mean_pool_normalize(hidden, mask)
         norms = np.linalg.norm(out, axis=1)
         np.testing.assert_allclose(norms, 1.0, rtol=1e-5)
 
     def test_all_zero_mask_does_not_crash_or_nan(self):
-        """attention mask が全ゼロでも NaN やゼロ除算にならない(防御の検証)。"""
+        """An all-zero attention mask must not produce NaN or a division by zero (defensive check)."""
         hidden = np.ones((2, 3, 4), dtype=np.float32)
         mask = np.zeros((2, 3), dtype=np.int64)
         out = mean_pool_normalize(hidden, mask)
@@ -59,7 +60,7 @@ class TestMeanPoolNormalize:
         assert not np.isinf(out).any()
 
     def test_batch_shape(self):
-        """(B, S, D) → (B, D) の形状変換。"""
+        """Shape transformation (B, S, D) -> (B, D)."""
         B, S, D = 5, 11, 8
         hidden = np.zeros((B, S, D), dtype=np.float32)
         hidden[:, :, 0] = 1.0
@@ -69,7 +70,7 @@ class TestMeanPoolNormalize:
 
 
 # ---------------------------------------------------------------------------
-# make_embedder の選択ロジック
+# make_embedder selection logic
 # ---------------------------------------------------------------------------
 
 def _make_settings(tmp_path, backend: str) -> Settings:
@@ -81,8 +82,8 @@ def _make_settings(tmp_path, backend: str) -> Settings:
 
 
 def _fabricate_onnx_dir(settings: Settings) -> None:
-    """export-onnx 済みに見えるディレクトリを捏造する(中身は空でよい。
-    make_embedder はファイルの存在と meta.json しか見ないため)。"""
+    """Fabricate a directory that looks like it has been export-onnx'd (contents can be
+    empty, since make_embedder only checks file existence and meta.json)."""
     d = settings.onnx_model_dir
     d.mkdir(parents=True)
     (d / "model.onnx").write_bytes(b"")
@@ -102,7 +103,7 @@ class TestMakeEmbedder:
     def test_backend_torch_returns_ruri(self, tmp_path):
         s = _make_settings(tmp_path, "torch")
         emb = make_embedder(s)
-        assert isinstance(emb, RuriEmbedder)  # embed は呼ばない(モデルDL回避)
+        assert isinstance(emb, RuriEmbedder)  # embed is never called (avoids model download)
 
     def test_auto_without_onnx_falls_back_to_torch(self, tmp_path):
         s = _make_settings(tmp_path, "auto")
@@ -117,13 +118,13 @@ class TestMakeEmbedder:
         assert isinstance(emb, OnnxRuriEmbedder)
 
     def test_onnx_dim_read_without_loading_session(self, tmp_path):
-        """dim は meta.json から即答され、ONNX セッションはロードされない
-        (model.onnx は空ファイルなのでロードが走れば必ず失敗する)。"""
+        """dim is answered immediately from meta.json, and the ONNX session is not loaded
+        (model.onnx is an empty file, so a load attempt would always fail)."""
         s = _make_settings(tmp_path, "auto")
         _fabricate_onnx_dir(s)
         emb = make_embedder(s)
         assert emb.dim == 512
-        assert emb._session is None  # セッション未ロードのまま
+        assert emb._session is None  # session remains unloaded
 
     def test_backend_onnx_forced_missing_dir_raises(self, tmp_path):
         s = _make_settings(tmp_path, "onnx")
@@ -143,19 +144,19 @@ class TestMakeEmbedder:
             make_embedder(s)
 
     def test_partial_onnx_dir_is_not_available(self, tmp_path):
-        """meta.json が欠けた不完全なディレクトリは ONNX とみなさない。"""
+        """An incomplete directory missing meta.json is not treated as ONNX."""
         s = _make_settings(tmp_path, "auto")
         d = s.onnx_model_dir
         d.mkdir(parents=True)
         (d / "model.onnx").write_bytes(b"")
         (d / "tokenizer.json").write_bytes(b"")
-        # meta.json なし
+        # no meta.json
         emb = make_embedder(s)
         assert isinstance(emb, RuriEmbedder)
 
 
 # ---------------------------------------------------------------------------
-# ENGRAM_EMBED_BACKEND 環境変数 → Settings
+# ENGRAM_EMBED_BACKEND environment variable -> Settings
 # ---------------------------------------------------------------------------
 
 class TestEmbedBackendEnv:

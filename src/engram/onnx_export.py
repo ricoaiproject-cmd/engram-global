@@ -1,20 +1,24 @@
-"""ONNX エクスポート(`engram export-onnx`)。
+"""ONNX export (`engram export-onnx`).
 
-sentence-transformers(torch)で動いている埋め込みモデルを ONNX へ一度だけ
-変換し、以後のランタイムを onnxruntime + tokenizers だけにする。torch の
-import(warm 12〜24秒 / cold 50秒超)が起動経路から消えるのが目的。
+Converts an embedding model running on sentence-transformers (torch) to ONNX
+once, so subsequent runtime uses only onnxruntime + tokenizers. The goal is
+to remove the torch import (12-24s warm / 50s+ cold) from the startup path.
 
-変換は torch.onnx.export を直接使う。optimum を使わないのは意図的:
-optimum は transformers のバージョン上限が厳しく、導入すると既存環境の
-transformers を巻き戻して sentence-transformers 本体を壊すことがある
-(2026-07-03 に transformers 5.12→4.57 への降格で実際に発生)。torch は
-sentence-transformers 経由で既に必須依存なので、追加依存ゼロで変換できる。
+Conversion uses torch.onnx.export directly. Not using optimum is deliberate:
+optimum pins transformers to a narrow version range, and pulling it in can
+downgrade the transformers already installed in the environment, breaking
+sentence-transformers itself (this actually happened on 2026-07-03, when
+transformers was downgraded from 5.12 to 4.57). torch is already a required
+dependency via sentence-transformers, so this conversion adds zero new
+dependencies.
 
-安全装置: 変換後に torch 経路(RuriEmbedder)と ONNX 経路(OnnxRuriEmbedder)で
-同じテキスト群を埋め込み、コサイン類似の最小値が PARITY_MIN 未満なら失敗として
-モデルディレクトリごと破棄する。DB は次元とベクトル分布をモデルに固定している
-(db.py の dim mismatch 例外)ため、分布がずれた ONNX を黙って採用すると既存の
-全記憶の検索が静かに壊れる。
+Safety net: after conversion, the same set of texts is embedded through both
+the torch path (RuriEmbedder) and the ONNX path (OnnxRuriEmbedder). If the
+minimum cosine similarity falls below PARITY_MIN, the conversion is treated
+as a failure and the model directory is discarded. Because the DB pins its
+dimensionality and vector distribution to the model (see the dim-mismatch
+exception in db.py), silently adopting a skewed ONNX model would silently
+break search over every existing memory.
 """
 
 from __future__ import annotations
@@ -27,13 +31,15 @@ from pathlib import Path
 
 from .config import Settings
 
-# torch fp32 → ONNX fp32 の変換誤差は通常 1e-6 級。0.999 を下回るのは
-# 変換の仕方が違う(pooling / prefix / tokenizer 差異)ことを意味する。
+# Conversion error between torch fp32 and ONNX fp32 is normally around 1e-6.
+# Dropping below 0.999 means the conversion diverged in some way (pooling,
+# prefix, or tokenizer mismatch).
 PARITY_MIN = 0.999
 
-# パリティ検証用のサンプル。実運用の記憶に近い、長さと内容が雑多な日本語文。
-# 長さを散らしてあるのは、トレース時に系列長依存の分岐が焼き付いた場合に
-# 検証で確実に露見させるため。
+# Parity-check sample texts. A mix of Japanese sentences with varied length
+# and content, chosen to resemble real memories. Lengths are deliberately
+# spread out so that any length-dependent branch baked into the traced graph
+# is reliably exposed by the check.
 PARITY_TEXTS = [
     "Windows では MCP サーバーのスレッドで torch を import すると劣化する",
     "ユーザーの好み: 業務文書は和暦・右詰めヘッダーで作成すること",
@@ -45,9 +51,12 @@ PARITY_TEXTS = [
     "次元が変わると既存 DB は開けず、reindex 以前に DB の作り直しが必要になる。"
     "運用上は export-onnx のパリティ検証がこの事故を防ぐ最後の砦になる。",
     "会議は毎週火曜 10 時から。議事録は MeetingRecords フォルダに保存する。",
-    # ModernBERT は 128 トークン超でスライディングウィンドウ注意に切り替わる。
-    # その経路がトレースに正しく乗ったかは長文でしか検証できないため、
-    # 境界を大きく越える文を必ず1つ含める(~400トークン)。
+    # Above ~128 tokens, ModernBERT-based models (e.g. Ruri-v3) switch to
+    # sliding-window attention. Whether that code path traces correctly can
+    # only be verified with a long input, so one text intentionally crosses
+    # that boundary by a wide margin (~400 tokens). The default MiniLM model
+    # is a plain BERT and doesn't have this switch, but the long-text check
+    # is kept so the parity harness still covers ModernBERT-based configs.
     "長期記憶の設計では、意味(埋め込み)と思い出しやすさ(活性度)を分離する。"
     "埋め込みベクトルは固定し、検索順位は使用履歴に基づく活性度で変調する。"
     "使うほど活性化し、放置するとべき乗則で減衰するが、完全には消えない。"
@@ -62,12 +71,12 @@ PARITY_TEXTS = [
 
 
 def _resolve_pad_token(model_name: str, target_dir: Path) -> tuple[str, int]:
-    """tokenizer.json を target_dir に配置し、(pad_token, pad_token_id) を返す。
+    """Place tokenizer.json in target_dir and return (pad_token, pad_token_id).
 
-    HF Hub のキャッシュから直接取得する。AutoTokenizer を経由しないのは、
-    モデルによっては sentencepiece の slow 経路に迷い込んで失敗するため
-    (ランタイムが使うのも tokenizers ライブラリ + tokenizer.json のみ)。
-    pad token は special_tokens_map.json の定義を読む。
+    Fetched directly from the HF Hub cache. AutoTokenizer is deliberately not
+    used, since for some models it falls back to the slow sentencepiece path
+    and fails (the runtime only needs the tokenizers library + tokenizer.json
+    anyway). The pad token is read from special_tokens_map.json.
     """
     from huggingface_hub import hf_hub_download
     from tokenizers import Tokenizer
@@ -87,22 +96,24 @@ def _resolve_pad_token(model_name: str, target_dir: Path) -> tuple[str, int]:
     except Exception:
         pass
     if not pad_token:
-        raise RuntimeError("pad token が特定できないモデルは未対応です")
+        raise RuntimeError("Cannot determine the pad token for this model; unsupported")
 
     pad_id = Tokenizer.from_file(str(target_dir / "tokenizer.json")).token_to_id(
         pad_token
     )
     if pad_id is None:
-        raise RuntimeError(f"pad token {pad_token!r} が語彙に存在しません")
+        raise RuntimeError(f"Pad token {pad_token!r} is not present in the vocabulary")
     return pad_token, int(pad_id)
 
 
 def _export_transformer(st_model, out_path: Path) -> None:
-    """SentenceTransformer が抱える transformer 本体を ONNX ファイルへ書き出す。
+    """Write the transformer backbone held by the SentenceTransformer out to
+    an ONNX file.
 
-    入力は (input_ids, attention_mask)、出力は last_hidden_state のみ。
-    pooling と正規化は ONNX に含めない(embedder.mean_pool_normalize が担う)。
-    batch / seq の両軸を動的にする。
+    Input is (input_ids, attention_mask); output is last_hidden_state only.
+    Pooling and normalization are not included in the ONNX graph (handled by
+    embedder.mean_pool_normalize). Both the batch and seq axes are made
+    dynamic.
     """
     import torch
 
@@ -120,13 +131,13 @@ def _export_transformer(st_model, out_path: Path) -> None:
             ).last_hidden_state
 
     wrapper = _LastHidden(auto_model)
-    # パディングを含むサンプル入力(mask の 0 経路もトレースに乗せる)
+    # Sample input that includes padding (so the mask's zero path is traced too)
     ids = torch.ones((2, 16), dtype=torch.int64)
     mask = torch.ones((2, 16), dtype=torch.int64)
     mask[1, 8:] = 0
 
     try:
-        # 新エクスポータ(dynamo)。現代的なモデル(ModernBERT 等)はこちらが確実
+        # New exporter (dynamo). More reliable for modern models (e.g. ModernBERT)
         batch = torch.export.Dim("batch")
         seq = torch.export.Dim("seq")
         program = torch.onnx.export(
@@ -141,7 +152,7 @@ def _export_transformer(st_model, out_path: Path) -> None:
         program.save(str(out_path))
     except Exception as e:
         print(
-            f"[export-onnx] dynamo エクスポータ失敗、旧エクスポータで再試行: {e}",
+            f"[export-onnx] dynamo exporter failed, retrying with the legacy exporter: {e}",
             file=sys.stderr,
         )
         torch.onnx.export(
@@ -160,14 +171,16 @@ def _export_transformer(st_model, out_path: Path) -> None:
 
 
 def export_onnx(settings: Settings, *, force: bool = False) -> dict:
-    """settings.embed_model を ONNX 化して settings.onnx_model_dir に置く。
+    """Convert settings.embed_model to ONNX and place it at
+    settings.onnx_model_dir.
 
-    戻り値はレポート dict(dim, パリティ統計, 出力先など)。失敗時は例外。
+    Returns a report dict (dim, parity stats, output path, etc). Raises on
+    failure.
     """
     target = settings.onnx_model_dir
     if target.is_dir() and not force:
         raise FileExistsError(
-            f"既に存在します: {target}\n上書きするには --force を付けてください"
+            f"Already exists: {target}\nPass --force to overwrite"
         )
 
     tmp = target.with_name(target.name + ".tmp")
@@ -179,7 +192,7 @@ def export_onnx(settings: Settings, *, force: bool = False) -> dict:
         from .embedder import OnnxRuriEmbedder, RuriEmbedder
 
         print(
-            f"[1/4] {settings.embed_model} を torch でロード中(基準経路)...",
+            f"[1/4] Loading {settings.embed_model} via torch (reference path)...",
             file=sys.stderr,
         )
         ref = RuriEmbedder(
@@ -193,7 +206,7 @@ def export_onnx(settings: Settings, *, force: bool = False) -> dict:
         dim = ref.dim
         max_seq = int(getattr(st_model, "max_seq_length", 8192))
 
-        print("[2/4] ONNX へ変換中...", file=sys.stderr)
+        print("[2/4] Converting to ONNX...", file=sys.stderr)
         _export_transformer(st_model, tmp / "model.onnx")
         pad_token, pad_token_id = _resolve_pad_token(settings.embed_model, tmp)
 
@@ -208,26 +221,27 @@ def export_onnx(settings: Settings, *, force: bool = False) -> dict:
         with (tmp / "meta.json").open("w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        print("[3/4] ONNX 経路でパリティ検証中...", file=sys.stderr)
+        print("[3/4] Verifying parity via the ONNX path...", file=sys.stderr)
         onnx = OnnxRuriEmbedder(
             tmp,
             query_prefix=settings.query_prefix,
             doc_prefix=settings.doc_prefix,
         )
         if onnx.dim != dim:
-            raise RuntimeError(f"次元不一致: torch={dim}, onnx={onnx.dim}")
+            raise RuntimeError(f"Dimension mismatch: torch={dim}, onnx={onnx.dim}")
         onnx_docs = onnx.embed_docs(PARITY_TEXTS)
         onnx_query = onnx.embed_query(PARITY_TEXTS[0])
 
-        # 両経路とも L2 正規化済みなので内積 = コサイン類似
+        # Both paths are L2-normalized, so dot product = cosine similarity
         doc_cos = (ref_docs * onnx_docs).sum(axis=1)
         query_cos = float((ref_query * onnx_query).sum())
         min_cos = float(min(doc_cos.min(), query_cos))
         if min_cos < PARITY_MIN:
             raise RuntimeError(
-                f"パリティ検証に失敗: min cosine = {min_cos:.6f} < {PARITY_MIN}\n"
-                "ONNX 経路の分布が torch 経路とずれています。このモデルを採用すると"
-                "既存 index.db の検索が壊れるため中止しました。"
+                f"Parity check failed: min cosine = {min_cos:.6f} < {PARITY_MIN}\n"
+                "The ONNX path's distribution diverges from the torch path. Aborted "
+                "because adopting this model would break search over the existing "
+                "index.db."
             )
 
         meta["parity"] = {
@@ -238,7 +252,7 @@ def export_onnx(settings: Settings, *, force: bool = False) -> dict:
         with (tmp / "meta.json").open("w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        print("[4/4] 配置中...", file=sys.stderr)
+        print("[4/4] Deploying...", file=sys.stderr)
         if target.is_dir():
             shutil.rmtree(target)
         tmp.replace(target)

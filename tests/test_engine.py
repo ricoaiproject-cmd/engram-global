@@ -1,8 +1,9 @@
-"""engine.py の単体テスト。
+"""Unit tests for engine.py.
 
-FakeEmbedder + モック db/store + now 注入で時間を制御する。
-db / store は NotImplementedError スタブのため、unittest.mock で差し替える。
-統合フェーズで db/store が完成したら mock を外してエンドツーエンドテストに昇格できる。
+Uses FakeEmbedder + mocked db/store + injected now to control time.
+db / store are NotImplementedError stubs, so they are replaced with unittest.mock.
+Once db/store are complete in the integration phase, the mocks can be removed
+to promote these into end-to-end tests.
 """
 
 from __future__ import annotations
@@ -21,15 +22,15 @@ from engram.engine import MemoryEngine, _hit_to_dict, _hybrid_relevances, build_
 from engram.models import MemoryRecord, RecallHit
 
 # ---------------------------------------------------------------------------
-# 共通フィクスチャ
+# Shared fixtures
 # ---------------------------------------------------------------------------
 
 DAY = 86400.0
-NOW = 1_750_000_000.0  # 固定の「現在時刻」
+NOW = 1_750_000_000.0  # fixed "current time"
 
 
 def _settings(tmp_path: Path) -> Settings:
-    """テスト用 Settings(一時ディレクトリを使用)。"""
+    """Test Settings (uses a temp directory)."""
     return Settings(
         memories_dir=tmp_path / "memories",
         data_dir=tmp_path / "data",
@@ -63,7 +64,7 @@ def _fake_record(
     path: str = "/tmp/test.md",
     content_hash: str | None = None,
 ) -> MemoryRecord:
-    """テスト用ダミー MemoryRecord。content_hash 未指定なら content から自動生成。"""
+    """Dummy MemoryRecord for tests. If content_hash is not given, it is auto-generated from content."""
     import hashlib
     h = content_hash if content_hash is not None else hashlib.sha256(content.strip().encode()).hexdigest()
     return MemoryRecord(
@@ -90,7 +91,7 @@ def _fake_db_mem(
     content_hash: str = "",
     created_at: float = NOW - DAY,
 ) -> dict:
-    """DB の get_memory / all_memories が返す dict 形式。"""
+    """The dict shape returned by DB's get_memory / all_memories."""
     return {
         "id": id,
         "type": type,
@@ -103,13 +104,13 @@ def _fake_db_mem(
 
 
 def _build_engine(tmp_path: Path, *, embedder=None):
-    """モック db / store でエンジンを構築するヘルパー。"""
+    """Helper that builds an engine with mocked db / store."""
     settings = _settings(tmp_path)
     embedder = embedder or FakeEmbedder(dim=64)
     db = MagicMock()
     store = MagicMock()
 
-    # デフォルトの振る舞い(多くのテストで必要)
+    # Default behavior (needed by most tests)
     db.vector_search.return_value = []
     db.keyword_search.return_value = []
     db.get_events.return_value = {}
@@ -122,18 +123,18 @@ def _build_engine(tmp_path: Path, *, embedder=None):
 
 
 # ---------------------------------------------------------------------------
-# remember / recall 往復テスト
+# remember / recall round-trip tests
 # ---------------------------------------------------------------------------
 
 class TestRememberRecall:
     def test_remember_then_recall(self, tmp_path):
-        """remember で保存した記憶が recall で取得できること。"""
+        """A memory saved via remember should be retrievable via recall."""
         engine, db, store = _build_engine(tmp_path)
 
-        # store.create のモック
+        # Mock store.create
         record = _fake_record(id="MEM001", content="Python の非同期処理について")
         store.create.return_value = record
-        db.vector_search.return_value = []  # 重複なし
+        db.vector_search.return_value = []  # no duplicate
 
         result = engine.remember(
             "Python の非同期処理について",
@@ -144,23 +145,23 @@ class TestRememberRecall:
         assert result["status"] == "created"
         assert result["id"] == "MEM001"
 
-        # db.upsert_memory が呼ばれたことを確認
+        # Confirm db.upsert_memory was called
         db.upsert_memory.assert_called_once()
 
-        # create イベントが記録されたことを確認
+        # Confirm a create event was recorded
         db.add_event.assert_called_once()
         args = db.add_event.call_args
         assert args[0][0] == "MEM001"
         assert args[0][1] == "create"
 
-        # recall のセットアップ: このノードを返す
+        # recall setup: return this node
         db.vector_search.return_value = [("MEM001", 0.95)]
         db.keyword_search.return_value = [("MEM001", -1.0)]
         db.all_memories.return_value = [_fake_db_mem(
             id="MEM001", importance=7, created_at=NOW - DAY
         )]
         db.get_events.return_value = {
-            "MEM001": [(NOW - 100, 2.4)]  # create イベント相当
+            "MEM001": [(NOW - 100, 2.4)]  # equivalent to a create event
         }
         store.read.return_value = record
 
@@ -171,7 +172,7 @@ class TestRememberRecall:
         assert hits[0]["id"] == "MEM001"
 
     def test_remember_stores_create_event_weight(self, tmp_path):
-        """importance に応じた初期符号化ブーストで create イベントが記録されること。"""
+        """A create event should be recorded with the initial encoding boost scaled to importance."""
         engine, db, store = _build_engine(tmp_path)
 
         record = _fake_record(id="MEM002", importance=10)
@@ -186,15 +187,15 @@ class TestRememberRecall:
 
 
 # ---------------------------------------------------------------------------
-# 重複検知テスト
+# Duplicate detection tests
 # ---------------------------------------------------------------------------
 
 class TestDuplicate:
     def test_duplicate_reinforced(self, tmp_path):
-        """cos >= dup_threshold の場合 duplicate_reinforced を返すこと。"""
+        """Should return duplicate_reinforced when cos >= dup_threshold."""
         engine, db, store = _build_engine(tmp_path)
 
-        # 既存記憶がほぼ同じベクトルで返る
+        # An existing memory is returned with an almost identical vector
         db.vector_search.return_value = [("EXIST001", 0.95)]  # >= 0.92
 
         result = engine.remember(
@@ -206,14 +207,14 @@ class TestDuplicate:
 
         assert result["status"] == "duplicate_reinforced"
         assert result["id"] == "EXIST001"
-        # store.create は呼ばれない
+        # store.create should not be called
         store.create.assert_not_called()
-        # reinforce イベントが記録される
+        # A reinforce event is recorded
         db.add_event.assert_called_once()
         assert db.add_event.call_args[0][1] == "reinforce"
 
     def test_no_duplicate_below_threshold(self, tmp_path):
-        """cos < dup_threshold の場合は新規作成されること。"""
+        """Should create a new memory when cos < dup_threshold."""
         engine, db, store = _build_engine(tmp_path)
 
         db.vector_search.return_value = [("EXIST001", 0.85)]  # < 0.92
@@ -226,12 +227,12 @@ class TestDuplicate:
 
 
 # ---------------------------------------------------------------------------
-# reinforce 後に順位が上がるテスト
+# Tests that rank rises after reinforce
 # ---------------------------------------------------------------------------
 
 class TestReinforce:
     def test_reinforce_raises_score(self, tmp_path):
-        """reinforce 後に recall スコアが上昇すること。"""
+        """The recall score should rise after reinforce."""
         engine, db, store = _build_engine(tmp_path)
 
         mem = _fake_db_mem(id="MEM_HOT", importance=5, created_at=NOW - 7 * DAY)
@@ -241,16 +242,16 @@ class TestReinforce:
         record = _fake_record(id="MEM_HOT", content="強化される記憶")
         store.read.return_value = record
 
-        # reinforce 前のスコア
+        # Score before reinforce
         db.get_events.return_value = {"MEM_HOT": [(NOW - 7 * DAY, 1.5)]}
         result_before = engine.recall("強化", now=NOW, record_hits=False)
         score_before = result_before["hits"][0]["score"] if result_before["hits"] else 0.0
 
-        # reinforce イベントを追加してスコアを再計算
+        # Add a reinforce event and recompute the score
         db.get_memory.return_value = mem
         engine.reinforce(["MEM_HOT"], strength=2.0, now=NOW)
 
-        # reinforce 後のイベントでスコアを確認
+        # Check the score with the post-reinforce event
         db.get_events.return_value = {
             "MEM_HOT": [
                 (NOW - 7 * DAY, 1.5),
@@ -263,7 +264,7 @@ class TestReinforce:
         assert score_after >= score_before
 
     def test_reinforce_unknown_ids(self, tmp_path):
-        """存在しない id は unknown_ids として列挙されること。"""
+        """A nonexistent id should be listed in unknown_ids."""
         engine, db, store = _build_engine(tmp_path)
         db.get_memory.return_value = None
 
@@ -272,7 +273,7 @@ class TestReinforce:
         assert result["reinforced"] == []
 
     def test_reinforce_creates_colink(self, tmp_path):
-        """複数 id を同時に reinforce すると co_recall リンクが作られること。"""
+        """Reinforcing multiple ids at once should create co_recall links."""
         engine, db, store = _build_engine(tmp_path)
         mem_a = _fake_db_mem(id="A")
         mem_b = _fake_db_mem(id="B")
@@ -280,14 +281,14 @@ class TestReinforce:
 
         engine.reinforce(["A", "B"], now=NOW)
 
-        # co_recall リンクが両方向に作られる
+        # co_recall links are created in both directions
         link_calls = db.add_link.call_args_list
         kinds = [c[0][2] for c in link_calls]
         assert kinds.count("co_recall") == 2
 
 
 # ---------------------------------------------------------------------------
-# correct フローテスト
+# correct flow tests
 # ---------------------------------------------------------------------------
 
 class TestCorrect:
@@ -303,12 +304,12 @@ class TestCorrect:
 
         new_record = _fake_record(id="NEW001", content="正しい情報", importance=7)
         store.create.return_value = new_record
-        db.vector_search.return_value = []  # 重複なし
+        db.vector_search.return_value = []  # no duplicate
 
         return engine, db, store, old_record, new_record
 
     def test_correct_creates_new_and_supersedes_old(self, tmp_path):
-        """correct で旧記憶が superseded になり新記憶が作られること。"""
+        """correct should mark the old memory as superseded and create a new one."""
         engine, db, store, old_record, new_record = self._setup_correct(tmp_path)
 
         result = engine.correct(
@@ -322,29 +323,29 @@ class TestCorrect:
         assert result["old_id"] == "OLD001"
         new_id = result["new_id"]
 
-        # 旧記憶が superseded になる
+        # The old memory becomes superseded
         db.set_tier.assert_called_with("OLD001", "superseded")
         store.set_tier.assert_called_with(old_record, "superseded")
 
-        # superseded_by リンクが張られる
+        # A superseded_by link is created
         link_calls = db.add_link.call_args_list
         superseded_calls = [c for c in link_calls if c[0][2] == "superseded_by"]
         assert len(superseded_calls) >= 1
         assert superseded_calls[0][0][0] == "OLD001"
 
     def test_correct_new_memory_has_correction_tag(self, tmp_path):
-        """訂正後の新記憶に correction タグが付くこと。"""
+        """The new memory created by correct should carry the correction tag."""
         engine, db, store, _, _ = self._setup_correct(tmp_path)
         engine.correct("OLD001", "正しい情報", "理由", now=NOW)
 
-        # store.create の引数に tags: ["correction", ...] が含まれる
+        # store.create's arguments should include tags: ["correction", ...]
         create_kwargs = store.create.call_args[1]
         assert "correction" in create_kwargs.get("tags", [])
 
     def test_correct_new_importance_raised(self, tmp_path):
-        """訂正後の記憶は correction_min_importance 以上になること。"""
+        """The corrected memory's importance should be at least correction_min_importance."""
         engine, db, store, old_record, _ = self._setup_correct(tmp_path)
-        # importance=3 の低い記憶を訂正
+        # Correct a low-importance (importance=3) memory
         old_record.importance = 3
         db.get_memory.return_value = _fake_db_mem(id="OLD001", importance=3)
 
@@ -354,7 +355,7 @@ class TestCorrect:
         assert create_kwargs["importance"] >= 7  # correction_min_importance
 
     def test_correct_not_found(self, tmp_path):
-        """存在しない id に correct すると not_found が返ること。"""
+        """Calling correct on a nonexistent id should return not_found."""
         engine, db, store, _, _ = self._setup_correct(tmp_path)
         db.get_memory.return_value = None
 
@@ -362,10 +363,10 @@ class TestCorrect:
         assert result["status"] == "not_found"
 
     def test_correct_old_not_in_fast_recall(self, tmp_path):
-        """訂正後、旧記憶(superseded)は fast recall(tier=hot のみ)に出ないこと。"""
+        """After correction, the old (superseded) memory should not appear in fast recall (tier=hot only)."""
         engine, db, store, _, _ = self._setup_correct(tmp_path)
-        # fast recall は tier=hot のみ対象
-        # superseded の記憶は all_memories(tiers=["hot"]) に含まれない
+        # fast recall only targets tier=hot
+        # a superseded memory is not included in all_memories(tiers=["hot"])
         db.all_memories.return_value = []
         db.vector_search.return_value = []
         db.keyword_search.return_value = []
@@ -375,10 +376,10 @@ class TestCorrect:
         assert "OLD001" not in hit_ids
 
     def test_correct_deep_note_on_superseded(self, tmp_path):
-        """deep recall で superseded 記憶に note が付くこと。"""
+        """A superseded memory should get a note attached in deep recall."""
         engine, db, store, old_record, _ = self._setup_correct(tmp_path)
 
-        # deep recall セットアップ: superseded な OLD001 を返す
+        # deep recall setup: return the superseded OLD001
         old_mem = _fake_db_mem(id="OLD001", tier="superseded", importance=5)
         db.all_memories.return_value = [old_mem]
         db.vector_search.return_value = [("OLD001", 0.8)]
@@ -395,37 +396,37 @@ class TestCorrect:
 
 
 # ---------------------------------------------------------------------------
-# co_recall リンク形成テスト
+# co_recall link formation tests
 # ---------------------------------------------------------------------------
 
 class TestCoRecallLink:
     def test_co_recall_links_formed_on_reinforce(self, tmp_path):
-        """3件同時 reinforce で3ペアの co_recall リンクが形成されること。"""
+        """Reinforcing 3 items at once should form co_recall links for 3 pairs."""
         engine, db, store = _build_engine(tmp_path)
 
         ids = ["A", "B", "C"]
         for id_ in ids:
             db.get_memory.side_effect = lambda i: _fake_db_mem(id=i)
 
-        # 実際は side_effect を dict で
+        # Actually use a dict-based side_effect
         mem_map = {i: _fake_db_mem(id=i) for i in ids}
         db.get_memory.side_effect = lambda i: mem_map.get(i)
 
         engine.reinforce(ids, now=NOW)
 
-        # A-B, A-C, B-C の3ペア × 双方向 = 6 co_recall リンク
+        # A-B, A-C, B-C: 3 pairs x 2 directions = 6 co_recall links
         link_calls = db.add_link.call_args_list
         co_recall_calls = [(c[0][0], c[0][1]) for c in link_calls if c[0][2] == "co_recall"]
         assert len(co_recall_calls) == 6
 
 
 # ---------------------------------------------------------------------------
-# forget テスト
+# forget tests
 # ---------------------------------------------------------------------------
 
 class TestForget:
     def test_forget_sets_trash_tier(self, tmp_path):
-        """forget でゴミ箱移動 + DB tier=trash になること。"""
+        """forget should move the file to trash and set DB tier=trash."""
         engine, db, store = _build_engine(tmp_path)
 
         record = _fake_record(id="DEL001")
@@ -439,7 +440,7 @@ class TestForget:
         db.set_tier.assert_called_once_with("DEL001", "trash")
 
     def test_forget_not_found(self, tmp_path):
-        """存在しない id に forget すると not_found が返ること。"""
+        """Calling forget on a nonexistent id should return not_found."""
         engine, db, store = _build_engine(tmp_path)
         db.get_memory.return_value = None
 
@@ -448,16 +449,16 @@ class TestForget:
 
 
 # ---------------------------------------------------------------------------
-# consolidation_candidates のクラスタリングテスト
+# consolidation_candidates clustering tests
 # ---------------------------------------------------------------------------
 
 class TestConsolidationCandidates:
     def test_clusters_similar_episodes(self, tmp_path):
-        """類似エンベディングの episode がクラスタされること。"""
+        """Episodes with similar embeddings should be clustered."""
         engine, db, store = _build_engine(tmp_path)
         embedder = engine.embedder
 
-        # 同じテキストの episode x2(埋め込みが同一 → cos=1.0)
+        # Two episodes with identical text (identical embedding -> cos=1.0)
         text = "今日の進捗: PR レビュー"
         ep_ids = ["EP001", "EP002"]
         ep_mems = [
@@ -465,13 +466,13 @@ class TestConsolidationCandidates:
                 id=eid,
                 type="episode",
                 tier="hot",
-                created_at=NOW - 20 * DAY,  # min_age_days=14 より古い
+                created_at=NOW - 20 * DAY,  # older than min_age_days=14
             )
             for eid in ep_ids
         ]
         db.all_memories.return_value = ep_mems
 
-        # embeddings: 同一ベクトル(cos=1.0 >= 0.75)
+        # embeddings: identical vector (cos=1.0 >= 0.75)
         vec = embedder.embed_docs([text])[0]
         db.get_embeddings.return_value = {eid: vec for eid in ep_ids}
 
@@ -484,13 +485,13 @@ class TestConsolidationCandidates:
         assert len(clusters[0]["ids"]) == 2
 
     def test_no_cluster_for_young_episodes(self, tmp_path):
-        """min_age_days より新しい episode はクラスタ候補に出ないこと。"""
+        """Episodes newer than min_age_days should not appear as cluster candidates."""
         engine, db, store = _build_engine(tmp_path)
         embedder = engine.embedder
 
         text = "今日の進捗"
         ep_ids = ["EP_NEW1", "EP_NEW2"]
-        # created_at を NOW - 3 days(< 14 days)に設定
+        # Set created_at to NOW - 3 days (< 14 days)
         ep_mems = [
             _fake_db_mem(
                 id=eid,
@@ -510,12 +511,12 @@ class TestConsolidationCandidates:
 
 
 # ---------------------------------------------------------------------------
-# skill_candidates のクラスタリングテスト
+# skill_candidates clustering tests
 # ---------------------------------------------------------------------------
 
 class TestSkillCandidates:
     def test_clusters_three_similar_episodes(self, tmp_path):
-        """類似 episode が3件(skill_min_count)集まればクラスタとして返ること。"""
+        """Once 3 similar episodes (skill_min_count) accumulate, they should be returned as a cluster."""
         engine, db, store = _build_engine(tmp_path)
         embedder = engine.embedder
 
@@ -538,7 +539,7 @@ class TestSkillCandidates:
         assert set(clusters[0]["ids"]) == set(ep_ids)
 
     def test_no_cluster_below_skill_min_count(self, tmp_path):
-        """2件しか無いクラスタは skill_min_count(既定3)未満なので返らないこと。"""
+        """A cluster with only 2 items is below skill_min_count (default 3), so it should not be returned."""
         engine, db, store = _build_engine(tmp_path)
         embedder = engine.embedder
 
@@ -557,7 +558,7 @@ class TestSkillCandidates:
         assert result["clusters"] == []
 
     def test_no_cluster_below_similarity_threshold(self, tmp_path):
-        """コサイン類似度が skill_cluster_sim 未満のペアはクラスタにならないこと。"""
+        """Pairs with cosine similarity below skill_cluster_sim should not form a cluster."""
         engine, db, store = _build_engine(tmp_path)
 
         ep_ids = ["EP001", "EP002", "EP003"]
@@ -567,7 +568,7 @@ class TestSkillCandidates:
         ]
         db.all_memories.return_value = ep_mems
 
-        # 直交に近いベクトル(cos がほぼ0、skill_cluster_sim=0.80 未満)を用意
+        # Prepare near-orthogonal vectors (cos close to 0, below skill_cluster_sim=0.80)
         dim = engine.embedder.dim
         vecs = {}
         for i, eid in enumerate(ep_ids):
@@ -580,13 +581,13 @@ class TestSkillCandidates:
         assert result["clusters"] == []
 
     def test_young_episode_is_still_candidate(self, tmp_path):
-        """consolidation と違い年齢フィルタが無いこと(作成直後でも対象になる)。"""
+        """Unlike consolidation, there is no age filter (should be a candidate even right after creation)."""
         engine, db, store = _build_engine(tmp_path)
         embedder = engine.embedder
 
         text = "決算資料の数値突合を実施した"
         ep_ids = ["EP_NEW1", "EP_NEW2", "EP_NEW3"]
-        # created_at を NOW(作成直後、consolidate_min_age_days=14 を大幅に下回る)
+        # Set created_at to NOW (right after creation, well below consolidate_min_age_days=14)
         ep_mems = [
             _fake_db_mem(id=eid, type="episode", tier="hot", created_at=NOW)
             for eid in ep_ids
@@ -603,27 +604,27 @@ class TestSkillCandidates:
         assert set(result["clusters"][0]["ids"]) == set(ep_ids)
 
     def test_cold_tier_episodes_excluded(self, tmp_path):
-        """tier=cold の episode は db.all_memories(tiers=["hot"]) の絞り込みで
-        そもそも渡ってこない(hot のみが対象であること)を確認する。"""
+        """Confirm that tier=cold episodes never even reach us because
+        db.all_memories(tiers=["hot"]) already filters them out (only hot is targeted)."""
         engine, db, store = _build_engine(tmp_path)
 
-        # db.all_memories は tiers=["hot"] 呼び出しに対して空を返すよう設定
-        # (cold の記憶は engine 側から見えない想定をモックで表現)
+        # Configure db.all_memories to return empty for a tiers=["hot"] call
+        # (mocks the assumption that cold memories are invisible to the engine)
         db.all_memories.return_value = []
 
         result = engine.skill_candidates(now=NOW)
         assert result["clusters"] == []
-        # tier=hot に限定して問い合わせていることを確認
+        # Confirm the query was restricted to tier=hot
         db.all_memories.assert_called_with(tiers=["hot"], types=["episode"])
 
 
 # ---------------------------------------------------------------------------
-# mark_consolidated テスト
+# mark_consolidated tests
 # ---------------------------------------------------------------------------
 
 class TestMarkConsolidated:
     def test_mark_consolidated_demotes_to_cold(self, tmp_path):
-        """mark_consolidated で episode が cold に降格され derived_from が張られること。"""
+        """mark_consolidated should demote episodes to cold and create derived_from links."""
         engine, db, store = _build_engine(tmp_path)
 
         ep_ids = ["EP001", "EP002"]
@@ -643,12 +644,12 @@ class TestMarkConsolidated:
         assert result["status"] == "ok"
         assert set(result["consolidated"]) == set(ep_ids)
 
-        # 各 episode が cold に降格される
+        # Each episode is demoted to cold
         tier_calls = [c for c in db.set_tier.call_args_list]
         for eid in ep_ids:
             assert any(c[0] == (eid, "cold") for c in tier_calls)
 
-        # derived_from リンクが張られる
+        # A derived_from link is created
         link_calls = db.add_link.call_args_list
         df_calls = [(c[0][0], c[0][1], c[0][2]) for c in link_calls if c[0][2] == "derived_from"]
         for eid in ep_ids:
@@ -656,17 +657,17 @@ class TestMarkConsolidated:
 
 
 # ---------------------------------------------------------------------------
-# reindex(手編集検知)テスト
+# reindex (manual-edit detection) tests
 # ---------------------------------------------------------------------------
 
 class TestReindex:
     def test_reindex_detects_new_file(self, tmp_path):
-        """DB にない Markdown が added としてカウントされること。"""
+        """Markdown not present in the DB should be counted as added."""
         engine, db, store = _build_engine(tmp_path)
 
         new_record = _fake_record(id="NEW_FILE", content_hash="abc")
         store.scan_all.return_value = iter([new_record])
-        db.get_memory.return_value = None  # DB にない
+        db.get_memory.return_value = None  # not in the DB
         db.all_memories.return_value = []
 
         result = engine.reindex()
@@ -677,12 +678,12 @@ class TestReindex:
         db.upsert_memory.assert_called_once()
 
     def test_reindex_detects_edit(self, tmp_path):
-        """content_hash の差異が updated としてカウントされること。"""
+        """A content_hash mismatch should be counted as updated."""
         engine, db, store = _build_engine(tmp_path)
 
         record = _fake_record(id="EDIT001", content_hash="new_hash")
         store.scan_all.return_value = iter([record])
-        # DB には古いハッシュが記録されている
+        # The DB has the old hash recorded
         db.get_memory.return_value = _fake_db_mem(
             id="EDIT001", content_hash="old_hash"
         )
@@ -694,10 +695,10 @@ class TestReindex:
         assert result["unchanged"] == 0
 
     def test_reindex_removes_orphan(self, tmp_path):
-        """ファイルが消えた DB エントリが removed としてカウントされること。"""
+        """A DB entry whose file has disappeared should be counted as removed."""
         engine, db, store = _build_engine(tmp_path)
 
-        # store にはファイルなし、DB には ORPHAN が残っている
+        # No file in store, but ORPHAN remains in the DB
         store.scan_all.return_value = iter([])
         db.all_memories.return_value = [_fake_db_mem(id="ORPHAN")]
 
@@ -706,7 +707,7 @@ class TestReindex:
         db.delete_memory.assert_called_once_with("ORPHAN")
 
     def test_reindex_unchanged(self, tmp_path):
-        """ハッシュが一致する場合は unchanged としてカウントされること。"""
+        """A matching hash should be counted as unchanged."""
         engine, db, store = _build_engine(tmp_path)
 
         record = _fake_record(id="SAME001", content_hash="same_hash")
@@ -723,20 +724,20 @@ class TestReindex:
 
 
 # ---------------------------------------------------------------------------
-# auto_deepened テスト
+# auto_deepened tests
 # ---------------------------------------------------------------------------
 
 class TestAutoDeepened:
     def test_auto_deepened_when_low_score(self, tmp_path):
-        """fast のスコアが deep_score_threshold 未満なら auto_deepened=True になること。"""
+        """auto_deepened should be True when the fast score is below deep_score_threshold."""
         engine, db, store = _build_engine(tmp_path)
 
-        # スコアが非常に低くなる状況: 類似度が低い
+        # A situation where the score becomes very low: low similarity
         mem = _fake_db_mem(id="COLD_MEM", importance=1, created_at=NOW - 365 * DAY)
         db.all_memories.return_value = [mem]
-        db.vector_search.return_value = [("COLD_MEM", 0.1)]  # 類似度低
+        db.vector_search.return_value = [("COLD_MEM", 0.1)]  # low similarity
         db.keyword_search.return_value = []
-        db.get_events.return_value = {}  # イベントなし → 活性度0
+        db.get_events.return_value = {}  # no events -> activation 0
         db.get_links.return_value = []
         db.get_embeddings.return_value = {}
         record = _fake_record(id="COLD_MEM", importance=1, content="関係なさそうな記憶")
@@ -749,14 +750,14 @@ class TestAutoDeepened:
         assert result["mode"] == "deep"
 
     def test_no_auto_deepened_when_high_score(self, tmp_path):
-        """fast のスコアが deep_score_threshold 以上なら auto_deepened=False になること。"""
+        """auto_deepened should be False when the fast score is at or above deep_score_threshold."""
         engine, db, store = _build_engine(tmp_path)
 
         mem = _fake_db_mem(id="HOT_MEM", importance=9, created_at=NOW - DAY)
         db.all_memories.return_value = [mem]
-        db.vector_search.return_value = [("HOT_MEM", 0.98)]  # 高類似度
+        db.vector_search.return_value = [("HOT_MEM", 0.98)]  # high similarity
         db.keyword_search.return_value = [("HOT_MEM", -1.0)]
-        # reinforce イベントがある → 高活性度
+        # There is a reinforce event -> high activation
         db.get_events.return_value = {
             "HOT_MEM": [(NOW - DAY, 3.0), (NOW - 2 * DAY, 2.0)]
         }
@@ -770,16 +771,16 @@ class TestAutoDeepened:
 
 
 # ---------------------------------------------------------------------------
-# deep recall での連想経由ノードテスト
+# Tests for link-only nodes in deep recall
 # ---------------------------------------------------------------------------
 
 class TestDeepRecall:
     def test_associative_via_link(self, tmp_path):
-        """deep recall でリンク経由のみのノードが via=associative になること。"""
+        """In deep recall, a node reached only via a link should have via=associative."""
         engine, db, store = _build_engine(tmp_path)
 
-        # DIRECT: ベクトル検索にヒット
-        # ASSOC: ベクトル検索には出ないが DIRECT から co_recall リンクで繋がる
+        # DIRECT: hit by vector search
+        # ASSOC: not hit by vector search, but connected from DIRECT via a co_recall link
         direct_mem = _fake_db_mem(id="DIRECT", importance=5, created_at=NOW - DAY)
         assoc_mem = _fake_db_mem(id="ASSOC", importance=5, created_at=NOW - DAY)
 
@@ -788,10 +789,10 @@ class TestDeepRecall:
         db.keyword_search.return_value = []
         db.get_events.return_value = {}
 
-        # DIRECT から ASSOC への co_recall リンク
+        # A co_recall link from DIRECT to ASSOC
         db.get_links.return_value = [("DIRECT", "ASSOC", "co_recall", 0.9)]
 
-        # ASSOC の埋め込みを返す(relevance 計算用)
+        # Return ASSOC's embedding (for relevance calculation)
         embedder = engine.embedder
         assoc_vec = embedder.embed_docs(["連想記憶"])[0]
         db.get_embeddings.return_value = {"ASSOC": assoc_vec}
@@ -812,19 +813,19 @@ class TestDeepRecall:
 
 
 # ---------------------------------------------------------------------------
-# correction タグが importance を引き上げるテスト
+# Tests that the correction tag raises importance
 # ---------------------------------------------------------------------------
 
 class TestCorrectionTag:
     def test_correction_tag_raises_importance(self, tmp_path):
-        """tags に correction が含まれる場合 importance が引き上げられること。"""
+        """When tags includes correction, importance should be raised."""
         engine, db, store = _build_engine(tmp_path)
 
         record = _fake_record(id="CORR001", importance=7)
         store.create.return_value = record
         db.vector_search.return_value = []
 
-        # importance=3 で correction タグ付き
+        # importance=3 with the correction tag
         engine.remember(
             "訂正情報",
             type="knowledge",
@@ -833,18 +834,18 @@ class TestCorrectionTag:
             now=NOW,
         )
 
-        # store.create に渡された importance が 7 以上になること
+        # The importance passed to store.create should be at least 7
         create_kwargs = store.create.call_args[1]
         assert create_kwargs["importance"] >= 7
 
 
 # ---------------------------------------------------------------------------
-# exhaustive recall(沈んだ記憶の掘り起こし)テスト
+# exhaustive recall (surfacing sunken memories) tests
 # ---------------------------------------------------------------------------
 
 
 class _FixedQueryEmbedder:
-    """embed_query が常に固定ベクトルを返すスタブ(relevance を厳密に制御する)。"""
+    """A stub whose embed_query always returns a fixed vector (for precise control of relevance)."""
 
     def __init__(self, qvec):
         self._q = np.asarray(qvec, dtype=np.float32)
@@ -859,13 +860,14 @@ class _FixedQueryEmbedder:
 
 class TestExhaustiveRecall:
     def test_exhaustive_ranks_by_relevance_ignoring_activation(self, tmp_path):
-        """mode=exhaustive は活性度を無視し関連度順。沈んだ高関連記憶が浮上し、
-        関連度が floor 未満の記憶は除外されること。"""
+        """mode=exhaustive ignores activation and ranks purely by relevance:
+        a sunken but highly relevant memory should surface, while a memory
+        whose relevance is below the floor should be excluded."""
         embedder = _FixedQueryEmbedder([1.0, 0.0, 0.0, 0.0])
         engine, db, store = _build_engine(tmp_path, embedder=embedder)
 
-        # R: 沈んだ(古い1イベントのみ)が関連度最大、G: 新しく高活性だが関連度中、
-        # L: 関連度ゼロ(floor 未満で除外される)
+        # R: sunken (only one old event) but max relevance, G: recent and highly
+        # active but mid relevance, L: zero relevance (excluded, below floor)
         r = _fake_db_mem(id="R", type="knowledge", importance=1,
                          created_at=NOW - 1000 * DAY, path="/tmp/R.md")
         g = _fake_db_mem(id="G", type="preference", importance=9,
@@ -879,8 +881,8 @@ class TestExhaustiveRecall:
             "L": np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32),   # cos 0.0
         }
         db.get_events.return_value = {
-            "R": [(NOW - 1000 * DAY, 1.0)],                 # 沈んでいる
-            "G": [(NOW - DAY, 3.0), (NOW - 2 * DAY, 2.0)],  # 高活性
+            "R": [(NOW - 1000 * DAY, 1.0)],                 # sunken
+            "G": [(NOW - DAY, 3.0), (NOW - 2 * DAY, 2.0)],  # highly active
             "L": [(NOW - DAY, 1.0)],
         }
         store.read.side_effect = lambda p: _fake_record(
@@ -892,24 +894,27 @@ class TestExhaustiveRecall:
         assert result["mode"] == "exhaustive"
         hits = result["hits"]
         ids = [h["id"] for h in hits]
-        # R が最上位(関連度 1.0)、G が続く。L は floor 未満で除外。
+        # R is top (relevance 1.0), followed by G. L is excluded (below the floor).
         assert ids[0] == "R"
         assert "G" in ids
         assert "L" not in ids
         hit_map = {h["id"]: h for h in hits}
-        # 沈んだ R が、より高活性の G より上に来ている(活性度を無視している証拠)
+        # Sunken R ranks above the more active G (evidence activation is ignored)
         assert hit_map["R"]["activation"] < hit_map["G"]["activation"]
         assert hit_map["R"]["via"] == "exhaustive"
         assert hit_map["R"]["relevance"] == pytest.approx(1.0, abs=1e-5)
 
     def test_fast_buries_what_exhaustive_surfaces(self, tmp_path):
-        """対比: 沈んだ高関連記憶 R が fast で高活性 G に首位を奪われるのは、
-        関連度差が正規化の床(relevance_norm_floor)未満に圧縮されている場合。
+        """Contrast: the sunken but highly relevant memory R loses the top spot
+        to the highly active G under fast only when the relevance gap is
+        compressed below the normalization floor (relevance_norm_floor).
 
-        かつては関連度差が大きくても(1.0 vs 0.6)活性度の下駄で逆転していたが、
-        候補内 min-max 正規化の導入(2026-07-06)で、明確な関連度差は勝つように
-        なった。fast が活性度側に順位を委ねるのは、候補間の関連度がほぼ無差別で
-        クエリが弁別的でないときだけ。その場合の掘り起こしが exhaustive の役割。"""
+        Previously, even a large relevance gap (1.0 vs 0.6) could be reversed
+        by the activation boost, but with the introduction of within-candidate
+        min-max normalization (2026-07-06), a clear relevance gap now wins.
+        fast defers to activation for ranking only when relevance is nearly
+        indistinguishable across candidates and the query is not discriminative.
+        Surfacing such cases is exhaustive's job."""
         embedder = _FixedQueryEmbedder([1.0, 0.0, 0.0, 0.0])
         engine, db, store = _build_engine(tmp_path, embedder=embedder)
 
@@ -918,7 +923,8 @@ class TestExhaustiveRecall:
         g = _fake_db_mem(id="G", type="preference", importance=9,
                          created_at=NOW - DAY, path="/tmp/G.md")
         db.all_memories.return_value = [r, g]
-        # 圧縮帯: 差 0.04 は床(0.10)未満 → 関連度は増幅されず活性度が順位を決める
+        # Compression band: the 0.04 gap is below the floor (0.10) -> relevance is
+        # not amplified, so activation decides the ranking
         db.vector_search.return_value = [("R", 0.84), ("G", 0.80)]
         db.keyword_search.return_value = []
         db.get_events.return_value = {
@@ -931,12 +937,14 @@ class TestExhaustiveRecall:
 
         result = engine.recall("ターゲット", mode="fast", now=NOW)
 
-        # 弁別不能な圧縮帯では高活性 G が首位(基底レベルへのフォールバック)
+        # In an indistinguishable compression band, highly active G ranks first
+        # (fallback to base-level activation)
         assert result["hits"][0]["id"] == "G"
 
     def test_fast_no_longer_buries_clear_relevance_gap(self, tmp_path):
-        """回帰: 関連度差が明確(1.0 vs 0.6)なら、fast でも沈んだ R が
-        高活性 G に勝つこと(正規化導入前はここが逆転していた)。"""
+        """Regression: when the relevance gap is clear (1.0 vs 0.6), the sunken
+        R should beat the highly active G even under fast (this used to be
+        reversed before normalization was introduced)."""
         embedder = _FixedQueryEmbedder([1.0, 0.0, 0.0, 0.0])
         engine, db, store = _build_engine(tmp_path, embedder=embedder)
 
@@ -960,19 +968,19 @@ class TestExhaustiveRecall:
         assert result["hits"][0]["id"] == "R"
 
     def test_deep_auto_escalates_to_exhaustive(self, tmp_path):
-        """deep でも最高スコアが弱いとき exhaustive へ自動エスカレーションし、
-        沈んだ高関連記憶を掘り起こすこと。"""
+        """Even under deep, when the top score is weak it should auto-escalate to
+        exhaustive and surface a sunken, highly relevant memory."""
         embedder = _FixedQueryEmbedder([1.0, 0.0, 0.0, 0.0])
         engine, db, store = _build_engine(tmp_path, embedder=embedder)
 
         m = _fake_db_mem(id="M", type="knowledge", importance=5,
                          created_at=NOW - 1000 * DAY, path="/tmp/M.md")
         db.all_memories.return_value = [m]
-        db.vector_search.return_value = [("M", 0.2)]   # fast/deep では低関連
+        db.vector_search.return_value = [("M", 0.2)]   # low relevance under fast/deep
         db.keyword_search.return_value = []
-        db.get_events.return_value = {}                # 活性度ゼロ
+        db.get_events.return_value = {}                # zero activation
         db.get_links.return_value = []
-        # exhaustive で再計算される実コサインは高い(本来は関連の高い記憶)
+        # The real cosine recomputed under exhaustive is high (it's actually highly relevant)
         db.get_embeddings.return_value = {
             "M": np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         }
@@ -987,7 +995,7 @@ class TestExhaustiveRecall:
 
 
 # ---------------------------------------------------------------------------
-# 起動時インデックス同期チェック(マルチマシン共有対策)
+# Startup index-freshness check (multi-machine sharing safeguard)
 # ---------------------------------------------------------------------------
 
 
@@ -997,7 +1005,7 @@ class TestIndexFreshness:
         return [_fake_db_mem(id=f"M{i}") for i in range(n)]
 
     def test_in_sync_no_reindex(self, tmp_path):
-        """raw .md 件数と index 件数が一致 → in_sync・scan も reindex もしない。"""
+        """Raw .md count matches index count -> in_sync, neither scan nor reindex runs."""
         engine, db, store = _build_engine(tmp_path)
         store.count_memory_files.return_value = 5
         db.all_memories.return_value = self._active(5)
@@ -1011,12 +1019,12 @@ class TestIndexFreshness:
         engine.reindex.assert_not_called()
 
     def test_phantom_md_counts_as_in_sync(self, tmp_path):
-        """raw .md が index より多くても、scan_all の有効件数が一致すれば
-        (空/壊れた/非記憶 md による見かけ上のズレ)reindex しない。"""
+        """Even if raw .md outnumbers the index, no reindex happens if scan_all's
+        valid count matches (an apparent gap caused by empty/broken/non-memory md)."""
         engine, db, store = _build_engine(tmp_path)
-        store.count_memory_files.return_value = 6      # phantom 1件込み
+        store.count_memory_files.return_value = 6      # includes 1 phantom file
         db.all_memories.return_value = self._active(5)
-        store.scan_all.return_value = [object()] * 5    # 有効な記憶は5件
+        store.scan_all.return_value = [object()] * 5    # 5 valid memories
         engine.reindex = MagicMock()
 
         res = engine.check_index_freshness(mode="auto")
@@ -1026,7 +1034,7 @@ class TestIndexFreshness:
         engine.reindex.assert_not_called()
 
     def test_auto_reindexes_on_real_drift(self, tmp_path):
-        """有効な記憶が index より多い(他マシンの未取り込み)→ auto は reindex。"""
+        """More valid memories than the index (not yet ingested on another machine) -> auto reindexes."""
         engine, db, store = _build_engine(tmp_path)
         store.count_memory_files.return_value = 10
         db.all_memories.return_value = self._active(5)
@@ -1041,7 +1049,7 @@ class TestIndexFreshness:
         engine.reindex.assert_called_once()
 
     def test_warn_does_not_reindex(self, tmp_path):
-        """warn モードは乖離を報告するだけで reindex しない。"""
+        """warn mode only reports the drift and does not reindex."""
         engine, db, store = _build_engine(tmp_path)
         store.count_memory_files.return_value = 10
         db.all_memories.return_value = self._active(5)
@@ -1055,7 +1063,7 @@ class TestIndexFreshness:
         engine.reindex.assert_not_called()
 
     def test_off_does_nothing(self, tmp_path):
-        """off モードはカウントもせず何もしない。"""
+        """off mode does not even count, and does nothing."""
         engine, db, store = _build_engine(tmp_path)
         store.count_memory_files.return_value = 10
         db.all_memories.return_value = self._active(5)
@@ -1069,54 +1077,56 @@ class TestIndexFreshness:
 
 
 # ---------------------------------------------------------------------------
-# _hybrid_relevances(ハイブリッド検索の relevance 合成)テスト
+# _hybrid_relevances (hybrid-search relevance blending) tests
 # ---------------------------------------------------------------------------
 
 class TestHybridRelevances:
     def test_fts_only_rare_token_gives_high_relevance(self):
-        """FTS のみヒットした希少トークン(bm25≒-6)は 1-exp(-6)≒0.9975 になること。"""
+        """A rare token hit only by FTS (bm25≈-6) should become 1-exp(-6)≈0.9975."""
         rel = _hybrid_relevances([], [("ID1", -6.0)])
         assert rel == {"ID1": pytest.approx(0.9975212478233336, abs=1e-9)}
 
     def test_common_word_fts_gives_lower_relevance(self):
-        """ありふれた語の FTS ヒット(bm25≒-0.5)は 1-exp(-0.5)≒0.3935 になること。"""
+        """An FTS hit on a common word (bm25≈-0.5) should become 1-exp(-0.5)≈0.3935."""
         rel = _hybrid_relevances([], [("ID1", -0.5)])
         assert rel["ID1"] == pytest.approx(1.0 - math.exp(-0.5), abs=1e-9)
 
     def test_both_hit_takes_max(self):
-        """ベクトルと FTS の両方にヒットした id は大きい方の値を採ること。"""
-        # ベクトル cos=0.5 だが FTS の bm25=-6(lex≒0.9975)の方が大きい → lex を採用
+        """An id hit by both vector and FTS should take the larger of the two values."""
+        # Vector cos=0.5, but FTS's bm25=-6 (lex≈0.9975) is larger -> lex is adopted
         rel = _hybrid_relevances([("ID1", 0.5)], [("ID1", -6.0)])
         assert rel["ID1"] == pytest.approx(1.0 - math.exp(-6.0), abs=1e-9)
 
-        # 逆にベクトル cos=0.99 が FTS の弱いヒット(bm25=-0.1, lex≒0.095)より大きい
+        # Conversely, vector cos=0.99 is larger than a weak FTS hit (bm25=-0.1, lex≈0.095)
         rel2 = _hybrid_relevances([("ID2", 0.99)], [("ID2", -0.1)])
         assert rel2["ID2"] == pytest.approx(0.99, abs=1e-9)
 
     def test_bm25_zero_or_positive_gives_zero(self):
-        """bm25 が 0 または正値の場合 lex は 0.0 になること(bm25<0 のみ有効)。"""
+        """When bm25 is 0 or positive, lex should be 0.0 (only bm25<0 is valid)."""
         rel = _hybrid_relevances([], [("ID1", 0.0), ("ID2", 3.5)])
         assert rel["ID1"] == 0.0
         assert rel["ID2"] == 0.0
 
     def test_empty_inputs_give_empty_dict(self):
-        """vec_results / kw_results が両方空なら空 dict を返すこと。"""
+        """If both vec_results / kw_results are empty, an empty dict should be returned."""
         assert _hybrid_relevances([], []) == {}
 
     def test_vector_only_keeps_cosine(self):
-        """ベクトルのみヒットした id はそのままコサイン類似度を保持すること。"""
+        """An id hit only by vector search should keep its cosine similarity as-is."""
         rel = _hybrid_relevances([("ID1", 0.72)], [])
         assert rel == {"ID1": 0.72}
 
 
 class TestHybridRelevanceIntegration:
     def test_rare_token_ranks_first_via_recall(self, tmp_path):
-        """recall を通じて: 希少な完全一致トークンを含む記憶が、他の記憶の
-        方がベクトル類似度(フェイク)が高くても検索結果の首位に来ること。
+        """Via recall: a memory containing a rare, exact-match token should rank
+        first in search results even when another memory has higher (fake)
+        vector similarity.
 
-        FakeEmbedder はハッシュベースの決定的疑似ベクトルなので、コサイン
-        類似度を意図的に操作するのは難しい。そこで実 build_engine + 実
-        db/store(tmp_path)を使い、FTS の BM25 が実際に効くことを検証する。
+        FakeEmbedder produces deterministic hash-based pseudo-vectors, so it's
+        hard to deliberately manipulate cosine similarity. Instead, this uses a
+        real build_engine + real db/store (tmp_path) to verify that FTS's BM25
+        actually takes effect.
         """
         settings = Settings(
             memories_dir=tmp_path / "memories",
@@ -1125,13 +1135,13 @@ class TestHybridRelevanceIntegration:
         )
         engine = build_engine(settings, embedder=FakeEmbedder(dim=256))
         try:
-            # 希少トークン(固有 ID 的な文字列)を含む記憶
+            # A memory containing a rare token (an ID-like string)
             rare_token = "ZXQ9981-エラーコード"
             target = engine.remember(
                 f"{rare_token} が出た場合はキャッシュを全消去してから再起動する",
                 type="knowledge", importance=5, now=NOW,
             )
-            # 語彙的には無関係だが多数投入して候補プールを厚くする
+            # Lexically unrelated, but inserted in bulk to thicken the candidate pool
             topics = ["予算配分", "採用面接", "週次定例", "顧客訪問",
                       "障害対応訓練", "棚卸し作業", "契約更新", "備品発注"]
             for i, topic in enumerate(topics):
@@ -1153,13 +1163,15 @@ class TestHybridRelevanceIntegration:
 
 
 # ---------------------------------------------------------------------------
-# forget: ゴミ箱移動後に db.set_path が呼ばれ、実ファイルが _trash/ に移ること
+# forget: after moving to trash, db.set_path should be called and the actual
+# file should move under _trash/
 # ---------------------------------------------------------------------------
 
 class TestForgetTrashPath:
     def test_forget_updates_db_path_to_trash(self, tmp_path):
-        """forget 後、db.get_memory(id)["path"] が _trash/ 配下を指し、
-        そのパスに実ファイルが存在すること(実 store/db を使う統合テスト)。"""
+        """After forget, db.get_memory(id)["path"] should point under _trash/,
+        and an actual file should exist at that path (integration test using
+        real store/db)."""
         settings = Settings(
             memories_dir=tmp_path / "memories",
             data_dir=tmp_path / "data",
@@ -1172,7 +1184,7 @@ class TestForgetTrashPath:
             )
             mem_id = created["id"]
 
-            # forget 前: パスは _trash 配下ではない
+            # Before forget: the path is not under _trash
             before = engine.db.get_memory(mem_id)
             assert "_trash" not in before["path"]
 
@@ -1189,20 +1201,24 @@ class TestForgetTrashPath:
 
 
 # ---------------------------------------------------------------------------
-# 関連度の候補内正規化(コサイン圧縮対策)の回帰テスト
+# Regression tests for within-candidate relevance normalization
+# (countermeasure for cosine compression)
 # ---------------------------------------------------------------------------
 
 class TestRelevanceNormalization:
-    """2026-07-06 のベースライン測定で観測された逆転の再現と修正確認。
+    """Reproduces and confirms the fix for a ranking reversal observed in the
+    2026-07-06 baseline measurement.
 
-    実データでは上位5件の57.3%が無関係で、うち18.7%は高活性の汎用
-    プリファレンスだった(15クエリ×5件)。原因はコサインの値域圧縮
-    (0.8〜0.87)により関連度の弁別力が潰れ、活性度+重要度の下駄が
-    順位を支配していたこと。候補内 min-max 正規化で修正する。
+    In real data, 57.3% of the top-5 results were irrelevant, and 18.7% of
+    those were highly active, generic preferences (15 queries x 5 results).
+    The cause was that cosine's compressed value range (0.8-0.87) crushed
+    relevance's discriminative power, letting the activation + importance
+    boost dominate the ranking. Fixed via within-candidate min-max normalization.
     """
 
     def _two_memories(self, tmp_path):
-        """TARGET=関連度は高いが沈んだ専門知識 / PREF=関連度は低いが常連の汎用記憶。"""
+        """TARGET = highly relevant but sunken specialist knowledge /
+        PREF = low relevance but a frequently-recalled general-purpose memory."""
         engine, db, store = _build_engine(tmp_path)
 
         target = _fake_db_mem(id="TARGET", importance=6, path="/tmp/target.md",
@@ -1226,13 +1242,14 @@ class TestRelevanceNormalization:
         return engine, db, store
 
     def test_compressed_relevance_wins_over_activation_gate(self, tmp_path):
-        """圧縮帯の関連度差(0.87 vs 0.80)が、常連記憶の活性度+重要度の下駄に
-        勝つこと(修正前は PREF が1位だった逆転の回帰テスト)。"""
+        """The compressed-band relevance gap (0.87 vs 0.80) should beat the
+        frequent memory's activation + importance boost (regression test for
+        the reversal where PREF used to rank first before the fix)."""
         engine, db, store = self._two_memories(tmp_path)
 
-        # 圧縮帯: 差は 0.07 しかない
+        # Compressed band: the gap is only 0.07
         db.vector_search.return_value = [("TARGET", 0.87), ("PREF", 0.80)]
-        # PREF は毎セッション強化されている常連(高活性)。TARGET は長期未使用
+        # PREF is reinforced every session (highly active); TARGET has been unused for a long time
         db.get_events.return_value = {
             "PREF": [(NOW - i * DAY, 1.0) for i in range(1, 11)],
         }
@@ -1243,16 +1260,17 @@ class TestRelevanceNormalization:
         ids = [h["id"] for h in result["hits"]]
         assert ids[0] == "TARGET", (
             f"関連度の高い記憶が常連記憶に負けた(修正前の逆転が再発): {ids}")
-        # 報告用 relevance は生値のまま(正規化値を漏らさない)
+        # The reported relevance stays as the raw value (the normalized value is not leaked)
         top = result["hits"][0]
         assert abs(top["relevance"] - 0.87) < 1e-6
 
     def test_tiny_spread_falls_back_to_activation(self, tmp_path):
-        """候補間の関連度差が床未満(=クエリが弁別的でない)のときは、
-        活性度・重要度側で順位が決まること(基底レベルへのフォールバック)。"""
+        """When the relevance gap between candidates is below the floor (i.e.
+        the query is not discriminative), ranking should be decided by
+        activation/importance (fallback to base-level activation)."""
         engine, db, store = self._two_memories(tmp_path)
 
-        # ほぼ無差別: 差 0.005(床 0.10 未満なので増幅されない)
+        # Nearly indistinguishable: gap of 0.005 (below the 0.10 floor, so not amplified)
         db.vector_search.return_value = [("TARGET", 0.805), ("PREF", 0.800)]
         db.get_events.return_value = {
             "PREF": [(NOW - i * DAY, 1.0) for i in range(1, 11)],
@@ -1265,8 +1283,9 @@ class TestRelevanceNormalization:
         assert ids[0] == "PREF", f"弁別不能時は高活性側が先頭のはず: {ids}"
 
     def test_escalation_still_uses_raw_scale(self, tmp_path):
-        """正規化で最上位候補の順位付けスコアが変わっても、deep 自動発動の
-        判定は生値スコアで行われる(高関連ヒットがあれば発動しない)こと。"""
+        """Even though normalization changes the top candidate's ranking score,
+        the auto-escalation-to-deep decision should still use the raw score
+        (it should not trigger when there's a highly relevant hit)."""
         engine, db, store = self._two_memories(tmp_path)
 
         db.vector_search.return_value = [("TARGET", 0.87), ("PREF", 0.80)]
@@ -1277,6 +1296,6 @@ class TestRelevanceNormalization:
         result = engine.recall("ドライブ文字変更の影響", mode="fast", now=NOW,
                                record_hits=False)
 
-        # 生値の複合スコア最高値は PREF 側で約 0.86 → 0.35 を大きく超える
+        # The raw composite score's max (around 0.86 on PREF's side) far exceeds 0.35
         assert result["auto_deepened"] is False
         assert result["mode"] == "fast"

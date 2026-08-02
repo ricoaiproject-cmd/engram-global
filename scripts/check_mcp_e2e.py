@@ -1,8 +1,9 @@
-"""MCP プロトコル経由の実機 E2E テスト。
+"""Real end-to-end test over the MCP protocol.
 
-Claude Code と同じ手順(spawn → initialize → tools/call)で engram-mcp.exe に
-接続し、recall がタイムアウトせずに返ることを確認する。recall の初回呼び出しは
-埋め込みモデルのロードを含むため、ここがハングしないことの証明になる。
+Connects to engram-mcp.exe using the same sequence as Claude Code
+(spawn -> initialize -> tools/call) and confirms that recall returns
+without timing out. The first recall call includes loading the embedding
+model, so this proves that step doesn't hang.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ if hasattr(sys.stdout, "reconfigure"):
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-# 開発用 venv → uv tool → PATH の順で engram-mcp を探す(環境非依存)
+# Look for engram-mcp in order: dev venv -> uv tool -> PATH (environment-independent)
 import shutil
 from pathlib import Path as _P
 

@@ -1,7 +1,7 @@
-"""実 db/store/engine を貫通する統合回帰テスト。
+"""Integration regression tests running through the real db/store/engine.
 
-特に「意味的に遠い記憶でも、リンクを辿れば deep recall で必ず引っ張ってこれる」
-という構想の核心(連想想起)を守る。
+These guard the core idea (associative recall) that "even a semantically
+distant memory can always be pulled in via deep recall by following a link."
 """
 
 import pytest
@@ -21,14 +21,14 @@ def engine(tmp_path):
         data_dir=tmp_path / "data",
         candidate_k=10,
     )
-    # dim=64 はハッシュ衝突ノイズが大きく無関係テキストも cos≈0.5 になるため 256
+    # dim=64 has too much hash-collision noise (unrelated text also lands at cos~=0.5), so use 256
     eng = build_engine(settings, embedder=FakeEmbedder(dim=256))
     yield eng
     eng.db.close()
 
 
 def test_associative_recall_reaches_semantically_distant_memory(engine):
-    """ベクトル検索では届かない記憶が、連想リンク経由で deep recall に浮上する。"""
+    """A memory unreachable by vector search surfaces in deep recall via an associative link."""
     topics = ["予算配分", "採用面接", "週次定例", "顧客訪問", "障害対応訓練",
               "棚卸し作業", "契約更新", "備品発注", "勉強会準備", "評価面談"]
     for i in range(60):
@@ -41,7 +41,7 @@ def test_associative_recall_reaches_semantically_distant_memory(engine):
         "SQLiteのWALモードでは書き込みと読み取りが並行できる",
         type="knowledge", importance=6, now=T0,
     )
-    # クエリと語彙の重なりが無い記憶を、ハブにリンクして cold に沈める
+    # Link a memory that shares no vocabulary with the query to the hub, then sink it to cold
     iso = engine.remember(
         "圧力鍋で豚の角煮を作るときは下茹でを30分する",
         type="knowledge", importance=5, now=T0,
@@ -66,14 +66,14 @@ def test_associative_recall_reaches_semantically_distant_memory(engine):
 
 
 def test_reinforce_lifts_memory_above_rival(engine):
-    """同程度に関連する2記憶のうち、reinforce された方が上位に来る。"""
-    # 文面が似すぎると重複検知(cos >= 0.92)で同一記憶に併合されるため、
-    # 同じ主題で十分に異なる2文にする
+    """Of two equally relevant memories, the reinforced one ranks higher."""
+    # If the wording is too similar, duplicate detection (cos >= 0.92) merges them into
+    # one memory, so use two sentences on the same topic that are sufficiently different
     a = engine.remember("Pythonの型ヒントでは 3.9 以降 List ではなく list を書く",
                         type="knowledge", importance=5, now=T0)
     b = engine.remember("Pythonの型ヒントで構造的部分型を表すなら typing.Protocol",
                         type="knowledge", importance=5, now=T0 - 1)
-    # b だけを繰り返し使う
+    # Repeatedly use only b
     for day in range(1, 6):
         engine.reinforce([b["id"]], now=T0 + day * DAY)
 
@@ -84,7 +84,7 @@ def test_reinforce_lifts_memory_above_rival(engine):
 
 
 def test_correct_flow_end_to_end(engine):
-    """訂正フロー: 旧記憶は fast から消え、deep では訂正済み注記付きで辿れる。"""
+    """Correction flow: the old memory disappears from fast, and deep still reaches it with a corrected-note."""
     old = engine.remember("設定ファイルは config.ini を使う",
                           type="knowledge", importance=5, now=T0)
     res = engine.correct(old["id"], "設定ファイルは settings.toml を使う",

@@ -1,25 +1,28 @@
-"""SQLite インデックス層(担当: Agent A)。
+"""SQLite index layer (owner: Agent A).
 
-正本は Markdown(store.py)。この DB はベクトル・FTS・アクセスログ・リンクの
-インデックスであり、アクセスログ以外は Markdown から再構築可能。
+The source of truth is Markdown (store.py). This DB is an index over vectors,
+FTS, access logs, and links; everything except the access log can be rebuilt
+from Markdown.
 
-実装要件:
-- sqlite-vec の vec0 仮想テーブル。`embedding float[{dim}] distance_metric=cosine`
-  で作成し、類似度 = 1 − distance。dim は初回初期化時に meta テーブルへ保存し、
-  以後の接続で不一致なら例外を出す。
-- FTS5 は `tokenize='trigram'`(日本語は空白分割できないため。SQLite>=3.34)。
-  クエリ語はダブルクォートで包んで構文エラーを防ぐ。bm25() は小さいほど良い。
-- vec0 の KNN(`WHERE embedding MATCH ? AND k = ?`)は tier フィルタを直接
-  かけられないため、k*4 件オーバーフェッチして memories と JOIN で絞る。
-- スキーマ:
+Implementation requirements:
+- A sqlite-vec vec0 virtual table, created with
+  `embedding float[{dim}] distance_metric=cosine`; similarity = 1 − distance.
+  dim is saved to the meta table on first initialization, and any mismatch on
+  later connections raises an exception.
+- FTS5 uses `tokenize='trigram'` (Japanese can't be split on whitespace;
+  requires SQLite>=3.34). Query terms are wrapped in double quotes to avoid
+  syntax errors. bm25() — lower is better.
+- vec0 KNN (`WHERE embedding MATCH ? AND k = ?`) can't apply a tier filter
+  directly, so we overfetch k*4 rows and narrow via a JOIN with memories.
+- Schema:
     memories(id TEXT PK, path TEXT, type TEXT, content_hash TEXT,
              created_at REAL, importance INTEGER, tier TEXT)
     access_events(id INTEGER PK AUTOINCREMENT, memory_id TEXT, ts REAL,
                   kind TEXT, weight REAL)  + INDEX(memory_id)
     links(src TEXT, dst TEXT, kind TEXT, weight REAL, PRIMARY KEY(src,dst,kind))
     meta(key TEXT PK, value TEXT)
-- 接続は check_same_thread=False、WAL モード。
-- 親ディレクトリが無ければ作成する。
+- Connections use check_same_thread=False, WAL mode.
+- The parent directory is created if it doesn't exist.
 """
 
 from __future__ import annotations
@@ -35,9 +38,10 @@ import sqlite_vec
 
 class IndexDB:
     def __init__(self, path: Path, dim: int) -> None:
-        """DB を開き(無ければ作成)、スキーマを初期化する。
+        """Open the DB (creating it if missing) and initialize the schema.
 
-        meta に保存済みの dim と引数 dim が食い違う場合は ValueError。
+        Raises ValueError if the dim stored in meta doesn't match the dim
+        argument.
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,15 +53,17 @@ class IndexDB:
         self._conn.row_factory = sqlite3.Row
 
         # Load sqlite-vec extension
-        # macOS 標準や python.org の Python は SQLite 拡張ロード非対応のまま
-        # ビルドされており、AttributeError で落ちる。原因と対処が分かる
-        # エラーにする(uv 管理の Python は対応済み)
+        # The stock macOS Python and python.org Python builds are compiled
+        # without SQLite extension-loading support, and fail with
+        # AttributeError. Raise an error that explains the cause and the fix
+        # (uv-managed Python does support it).
         if not hasattr(self._conn, "enable_load_extension"):
             self._conn.close()
             raise RuntimeError(
-                "この Python の SQLite は拡張ロード非対応のため、ベクトル検索"
-                "(sqlite-vec)を初期化できません。uv 管理の Python で入れ直して"
-                "ください: UV_PYTHON_PREFERENCE=only-managed uv tool install "
+                "This Python's SQLite doesn't support extension loading, so "
+                "vector search (sqlite-vec) can't be initialized. Please "
+                "reinstall with a uv-managed Python: "
+                "UV_PYTHON_PREFERENCE=only-managed uv tool install "
                 "--python 3.12 --force git+https://github.com/ricoaiproject-cmd/engram.git"
             )
         self._conn.enable_load_extension(True)
@@ -66,8 +72,9 @@ class IndexDB:
 
         # WAL mode
         self._conn.execute("PRAGMA journal_mode=WAL")
-        # MCP サーバーとフック(session-end)が同時に書く場合に備え、
-        # ロック競合は即エラーにせず最大5秒待つ
+        # In case the MCP server and the session-end hook write at the same
+        # time, wait up to 5 seconds on lock contention instead of failing
+        # immediately.
         self._conn.execute("PRAGMA busy_timeout=5000")
 
         self._init_schema()
@@ -109,7 +116,7 @@ class IndexDB:
                     room TEXT DEFAULT 'common'
                 )"""
             )
-            # 旧スキーマ(v0.2 以前)からのマイグレーション: room 列が無ければ追加
+            # Migration from the old schema (v0.2 and earlier): add the room column if missing
             cols = {
                 r["name"]
                 for r in self._conn.execute("PRAGMA table_info(memories)")
@@ -176,7 +183,7 @@ class IndexDB:
         embedding: np.ndarray,
         room: str = "common",
     ) -> None:
-        """memories / vec_memories / fts_memories を一括 upsert(同一トランザクション)。"""
+        """Upsert memories / vec_memories / fts_memories together (single transaction)."""
         emb = np.asarray(embedding, dtype=np.float32)
         emb_bytes = emb.tobytes()
 
@@ -217,7 +224,7 @@ class IndexDB:
             )
 
     def delete_memory(self, id: str) -> None:
-        """memories / vec / fts / events / links から完全に削除(reindex 時の孤児掃除用)。"""
+        """Fully delete from memories / vec / fts / events / links (used to clean up orphans during reindex)."""
         with self._conn:
             self._conn.execute("DELETE FROM memories WHERE id = ?", (id,))
             self._conn.execute(
@@ -234,7 +241,7 @@ class IndexDB:
             )
 
     def get_memory(self, id: str) -> dict | None:
-        """memories 行を dict で返す(無ければ None)。"""
+        """Return a memories row as a dict (None if not found)."""
         row = self._conn.execute(
             "SELECT * FROM memories WHERE id = ?", (id,)
         ).fetchone()
@@ -293,7 +300,7 @@ class IndexDB:
     def get_events(
         self, memory_ids: list[str]
     ) -> dict[str, list[tuple[float, float]]]:
-        """{memory_id: [(ts, weight), ...]} を1クエリで返す。無い id は空リスト。"""
+        """Return {memory_id: [(ts, weight), ...]} in a single query. Ids not found get an empty list."""
         result: dict[str, list[tuple[float, float]]] = {
             mid: [] for mid in memory_ids
         }
@@ -310,7 +317,7 @@ class IndexDB:
         return result
 
     def export_events_jsonl(self, out_path: Path) -> int:
-        """アクセスログ全件を JSONL に書き出す(夜間バックアップ用)。件数を返す。"""
+        """Write all access log entries out to JSONL (used for the nightly backup). Returns the row count."""
         rows = self._conn.execute(
             "SELECT memory_id, ts, kind, weight FROM access_events ORDER BY id"
         ).fetchall()
@@ -342,7 +349,7 @@ class IndexDB:
         increment: float = 1.0,
         max_weight: float = 1.0,
     ) -> None:
-        """リンクを作成、既存なら weight += increment(max_weight でクランプ)。"""
+        """Create a link; if it already exists, weight += increment (clamped to max_weight)."""
         with self._conn:
             existing = self._conn.execute(
                 "SELECT weight FROM links WHERE src=? AND dst=? AND kind=?",
@@ -364,7 +371,7 @@ class IndexDB:
     def get_links(
         self, ids: list[str], *, kinds: list[str] | None = None
     ) -> list[tuple[str, str, str, float]]:
-        """ids のいずれかを src または dst に含むエッジ (src, dst, kind, weight) を返す。"""
+        """Return edges (src, dst, kind, weight) where either src or dst is in ids."""
         if not ids:
             return []
         placeholders = ",".join("?" * len(ids))
@@ -381,8 +388,8 @@ class IndexDB:
         return [(r["src"], r["dst"], r["kind"], r["weight"]) for r in rows]
 
     def get_embeddings(self, ids: list[str]) -> dict[str, np.ndarray]:
-        """vec_memories から埋め込みを取得 {id: float32 ndarray}。無い id は含めない。
-        (deep recall で連想経由ノードの関連度を再計算するために使う)"""
+        """Fetch embeddings from vec_memories as {id: float32 ndarray}. Ids not found are omitted.
+        (Used by deep recall to recompute relevance for nodes reached via association.)"""
         if not ids:
             return {}
         placeholders = ",".join("?" * len(ids))
@@ -407,7 +414,7 @@ class IndexDB:
         types: list[str] | None = None,
         rooms: list[str] | None = None,
     ) -> list[tuple[str, float]]:
-        """(id, cosine類似度) を類似度降順で k 件。フィルタはオーバーフェッチ+JOIN。"""
+        """Return k (id, cosine similarity) pairs sorted by similarity descending. Filters are applied via overfetch+JOIN."""
         emb = np.asarray(embedding, dtype=np.float32)
         emb_bytes = emb.tobytes()
 
@@ -468,7 +475,7 @@ class IndexDB:
         types: list[str] | None,
         rooms: list[str] | None,
     ) -> set[str] | None:
-        """tier/type/room フィルタを通る id 集合を返す。フィルタなしなら None。"""
+        """Return the set of ids passing the tier/type/room filters. Returns None if no filters are set."""
         if not (tiers or types or rooms):
             return None
         placeholders = ",".join("?" * len(candidate_ids))
@@ -502,14 +509,16 @@ class IndexDB:
         types: list[str] | None = None,
         rooms: list[str] | None = None,
     ) -> list[tuple[str, float]]:
-        """FTS5(trigram) BM25。(id, スコア) をランク順で k 件。
+        """FTS5 (trigram) BM25. Returns k (id, score) pairs in rank order.
 
-        trigram は3文字未満の語をトークン化できない。短いトークンを MATCH に
-        混ぜると(トークンが生成されず)AND 条件が全体を0件にするため、3文字
-        以上のトークンだけで MATCH 式を組む。3文字以上のトークンが1つも無い
-        短いクエリ(日本語の2文字語など)は LIKE 部分一致へフォールバックし、
-        IDF ベースの擬似スコアを返す(_like_search)。
-        FTS 構文エラーは空リストを返す(落とさない)。
+        Trigram tokenization can't handle terms shorter than 3 characters.
+        Mixing a short token into MATCH produces no token for it, which makes
+        the AND condition match zero rows overall — so the MATCH expression
+        is built only from tokens of 3+ characters. A short query with no
+        token of 3+ characters (e.g. a 2-character Japanese word) falls back
+        to a LIKE substring match and returns an IDF-based pseudo-score
+        (_like_search).
+        FTS syntax errors return an empty list (never raises).
         """
         stripped = query.strip()
         if not stripped:
@@ -566,18 +575,20 @@ class IndexDB:
         types: list[str] | None = None,
         rooms: list[str] | None = None,
     ) -> list[tuple[str, float]]:
-        """trigram に乗らない短いトークン用の LIKE 部分一致(AND)。
+        """LIKE substring match (AND) for short tokens that trigram can't handle.
 
-        スコアは BM25 の代わりに IDF のみの擬似値:
-            pseudo_bm25 = -ln(1 + N/df)   (N=全件数, df=マッチ件数)
-        engine 側の写像 lex = 1 - exp(bm25) と合成すると lex = N/(N+df) となり、
-        希少語のヒットほど relevance が高い(BM25 経路と意味論が一貫する)。
-        並び順はトークン出現回数の合計 desc(同点は insertion order)。
+        Instead of BM25, the score is an IDF-only pseudo-value:
+            pseudo_bm25 = -ln(1 + N/df)   (N=total row count, df=match count)
+        Combined with the engine-side mapping lex = 1 - exp(bm25), this gives
+        lex = N/(N+df), so rarer-term hits score higher relevance (consistent
+        in meaning with the BM25 path).
+        Sort order is total token occurrence count descending (ties keep
+        insertion order).
         """
         if not tokens:
             return []
 
-        # % _ \ をエスケープした部分一致条件(トークンの AND)
+        # Substring match condition (AND of tokens) with % _ \ escaped
         def esc(t: str) -> str:
             return (
                 t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -602,7 +613,7 @@ class IndexDB:
                 ).fetchone()["n"]
             )
 
-            # 出現回数の合計(REPLACE トリック)で並べる
+            # Order by total occurrence count (REPLACE trick)
             occ_terms = []
             occ_params: list = []
             for t in tokens:
@@ -642,7 +653,7 @@ class IndexDB:
 
     # --- misc ---
     def stats(self) -> dict:
-        """件数(type別・tier別)、イベント数、リンク数(kind別)等。"""
+        """Counts (by type, by tier), event count, link count (by kind), etc."""
         total = self._conn.execute(
             "SELECT COUNT(*) AS cnt FROM memories"
         ).fetchone()["cnt"]

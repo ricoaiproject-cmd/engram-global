@@ -1,8 +1,8 @@
-"""観測性(perf ログ)のテスト。
+"""Tests for observability (the perf log).
 
-append_perf / timed の単体テストに加え、server.py への計装が FastMCP の
-ツールスキーマを壊していないことを回帰確認する(「計装したらツールが
-消えた/壊れた」を検知するためのガード)。
+In addition to unit tests of append_perf / timed, this confirms as a regression
+guard that instrumenting server.py has not broken FastMCP's tool schema (a
+guard to catch "instrumenting it made a tool disappear/break").
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def test_append_perf_rotates_when_over_5mb(tmp_path):
     perf_dir.mkdir(parents=True, exist_ok=True)
     log = perf_dir / "perf_log.jsonl"
 
-    # 5MB を超える既存ログを用意しておく
+    # Set up an existing log that exceeds 5MB
     log.write_bytes(b"x" * (5 * 1024 * 1024 + 1))
 
     append_perf(settings, {"ts": 3.0, "kind": "tool", "name": "stats", "ms": 1.0, "ok": True})
@@ -60,7 +60,7 @@ def test_append_perf_rotates_when_over_5mb(tmp_path):
     assert old_log.is_file()
     assert old_log.stat().st_size == 5 * 1024 * 1024 + 1
 
-    # 新しいログには今回追記した1行だけが入っている
+    # The new log contains only the one line appended this time
     lines = log.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     rec = json.loads(lines[0])
@@ -69,10 +69,10 @@ def test_append_perf_rotates_when_over_5mb(tmp_path):
 
 def test_append_perf_disabled_when_perf_log_false(tmp_path):
     settings = _make_settings(tmp_path, perf_log=False)
-    # append_perf 自体は perf_log を見ないので直接呼べば書き込まれる。
-    # 「無効化」の実体は timed 側が append_perf を呼ばないこと(下のテストで検証)。
-    # ここでは disabled 設定でもディレクトリが自動生成されないことを
-    # timed 経由で確認する。
+    # append_perf itself doesn't check perf_log, so calling it directly still writes.
+    # "Disabled" actually means timed doesn't call append_perf (verified in the test below).
+    # Here we confirm via timed that the directory isn't auto-created even with
+    # the disabled setting.
     with timed(settings, "tool", "recall"):
         pass
     perf_dir = settings.data_dir / "perf"
@@ -122,7 +122,7 @@ def test_timed_noop_when_perf_log_disabled(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# server.py への計装が FastMCP のツールスキーマを壊していないことの回帰確認
+# Regression check: instrumenting server.py has not broken FastMCP's tool schema
 # ---------------------------------------------------------------------------
 
 _EXPECTED_TOOLS = {
@@ -147,8 +147,8 @@ def test_server_tool_registry_intact_after_instrumentation():
     names = {t.name for t in tools}
     assert names == _EXPECTED_TOOLS
 
-    # 各ツールがスキーマ(inputSchema)を保持しており、想定した引数が
-    # 残っていることも確認する(recall を代表例に)
+    # Also confirm each tool retains its schema (inputSchema) and that the
+    # expected arguments are still present (using recall as a representative example)
     by_name = {t.name: t for t in tools}
     recall_tool = by_name["recall"]
     assert recall_tool.inputSchema is not None

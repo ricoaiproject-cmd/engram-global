@@ -1,4 +1,4 @@
-"""フック(①自動符号化・②自発的想起)とフック登録のテスト。"""
+"""Tests for the hooks (auto-encoding and spontaneous recall) and hook registration."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ NOW = 1_750_000_000.0
 
 @pytest.fixture
 def engram_home(tmp_path, monkeypatch):
-    """ENGRAM_HOME を一時ディレクトリに向ける(設定・DB・記憶を隔離)。"""
+    """Point ENGRAM_HOME at a temp directory (isolating settings, DB, and memory)."""
     home = tmp_path / "engram_home"
     home.mkdir()
     monkeypatch.setenv("ENGRAM_HOME", str(home))
@@ -67,7 +67,7 @@ def _write_transcript(path):
 
 
 # ---------------------------------------------------------------------------
-# ① session-end
+# session-end (auto-encoding)
 # ---------------------------------------------------------------------------
 
 def test_session_end_creates_episode(engram_home, tmp_path, monkeypatch):
@@ -90,11 +90,11 @@ def test_session_end_creates_episode(engram_home, tmp_path, monkeypatch):
     assert len(episodes) == 1
     db.close()
 
-    # 符号化済みとして記録される
+    # Recorded as already encoded
     marks = (engram_home / "encoded_sessions.txt").read_text(encoding="utf-8")
     assert "sess-1" in marks
 
-    # 同じセッションを二度符号化しない
+    # Don't encode the same session twice
     assert run_session_end(stdin) == 0
     db = IndexDB(settings.db_path, 64)
     assert len(db.all_memories(types=["episode"])) == 1
@@ -128,11 +128,11 @@ def test_session_end_never_raises_on_garbage(engram_home):
 
 
 # ---------------------------------------------------------------------------
-# ② user-prompt
+# user-prompt (spontaneous recall)
 # ---------------------------------------------------------------------------
 
 def test_user_prompt_shadow_logs(engram_home, monkeypatch):
-    # 記憶を1件用意
+    # Set up one memory
     engine = _fake_build_engine()
     engine.remember("予算要求の書式は財務課の様式7を使うこと", "knowledge", 7)
     engine.db.close()
@@ -181,7 +181,7 @@ def test_user_prompt_skips_short_and_slash(engram_home):
 
 
 def test_user_prompt_skips_system_text(engram_home):
-    # エージェント/ハーネスが差し込む非人間テキストには反応しない
+    # Does not react to non-human text injected by an agent/harness
     for noise in (
         "<task-notification>\n<task-id>abc</task-id>\n</task-notification>",
         "<!-- attach -->\n> 過去の引用文がここに入る",
@@ -195,18 +195,18 @@ def test_user_prompt_skips_system_text(engram_home):
 
 
 # ---------------------------------------------------------------------------
-# ③ 統合の自動促し(consolidation nudge)
+# consolidation nudge (automatic consolidation prompt)
 # ---------------------------------------------------------------------------
 
 class TestConsolidationNudge:
-    """_consolidation_nudge の単体テスト(状態ファイルの読み書きのみ、エンジン不使用)。"""
+    """Unit tests for _consolidation_nudge (state file read/write only, no engine)."""
 
     def test_nudge_fires_when_clusters_at_threshold(self, engram_home):
-        """クラスタ数が閾値以上・最終促しが古ければ促し文が返ること。"""
+        """A nudge message is returned when the cluster count is at/above the threshold and the last nudge is old enough."""
         settings = get_settings()
         _write_consolidation_state(settings, {
-            "clusters": 3,  # consolidate_nudge_min_clusters の既定値と同数
-            "last_nudged_at": NOW - 30 * DAY,  # 十分に古い
+            "clusters": 3,  # same as the default value of consolidate_nudge_min_clusters
+            "last_nudged_at": NOW - 30 * DAY,  # old enough
         })
 
         msg = _consolidation_nudge(settings, now=NOW)
@@ -216,7 +216,7 @@ class TestConsolidationNudge:
         assert "mark_consolidated" in msg
 
     def test_nudge_stamps_last_nudged_at(self, engram_home):
-        """促し文を返した際に last_nudged_at が更新されること。"""
+        """last_nudged_at is updated when a nudge message is returned."""
         settings = get_settings()
         _write_consolidation_state(settings, {
             "clusters": 5, "last_nudged_at": 0.0,
@@ -229,7 +229,7 @@ class TestConsolidationNudge:
         assert state["last_nudged_at"] == NOW
 
     def test_nudge_throttled_on_second_immediate_call(self, engram_home):
-        """促し直後の再呼び出しは None を返すこと(最短間隔でスロットル)。"""
+        """A call right after a nudge returns None (throttled by the minimum interval)."""
         settings = get_settings()
         _write_consolidation_state(settings, {
             "clusters": 4, "last_nudged_at": NOW - 30 * DAY,
@@ -238,32 +238,32 @@ class TestConsolidationNudge:
         first = _consolidation_nudge(settings, now=NOW)
         assert first is not None
 
-        # 直後の2回目呼び出し(last_nudged_at がスタンプされたばかり)
+        # Second call right after (last_nudged_at was just stamped)
         second = _consolidation_nudge(settings, now=NOW + 1.0)
         assert second is None
 
     def test_no_nudge_below_cluster_threshold(self, engram_home):
-        """クラスタ数が閾値未満なら促さないこと。"""
+        """Does not nudge when the cluster count is below the threshold."""
         settings = get_settings()
         _write_consolidation_state(settings, {
-            "clusters": 2,  # min_clusters(既定3)未満
+            "clusters": 2,  # below min_clusters (default 3)
             "last_nudged_at": NOW - 30 * DAY,
         })
 
         assert _consolidation_nudge(settings, now=NOW) is None
 
     def test_no_nudge_when_interval_not_elapsed(self, engram_home):
-        """最短間隔(既定7日)が経過していなければ促さないこと。"""
+        """Does not nudge when the minimum interval (default 7 days) has not elapsed."""
         settings = get_settings()
         _write_consolidation_state(settings, {
             "clusters": 5,
-            "last_nudged_at": NOW - 1 * DAY,  # 7日未満しか経っていない
+            "last_nudged_at": NOW - 1 * DAY,  # less than 7 days have passed
         })
 
         assert _consolidation_nudge(settings, now=NOW) is None
 
     def test_no_nudge_when_setting_disabled(self, engram_home):
-        """consolidate_nudge=False なら閾値・間隔を満たしていても促さないこと。"""
+        """Does not nudge when consolidate_nudge=False, even if the threshold and interval are met."""
         (engram_home / "config.toml").write_text(
             "consolidate_nudge = false\n", encoding="utf-8",
         )
@@ -275,7 +275,7 @@ class TestConsolidationNudge:
         assert _consolidation_nudge(settings, now=NOW) is None
 
     def test_nudge_works_even_when_surface_mode_off(self, engram_home):
-        """surface_mode='off' でもナッジ自体は独立して発火すること。"""
+        """The nudge itself still fires independently even when surface_mode='off'."""
         (engram_home / "config.toml").write_text(
             "surface_mode = 'off'\n", encoding="utf-8",
         )
@@ -289,12 +289,12 @@ class TestConsolidationNudge:
 
 
 class TestConsolidationNudgeViaUserPrompt:
-    """run_user_prompt を通じたナッジの結線テスト(additionalContext への反映)。"""
+    """Wiring test for the nudge via run_user_prompt (reflected in additionalContext)."""
 
     def test_user_prompt_emits_nudge_when_surface_mode_off(self, engram_home,
                                                             capsys):
-        """surface_mode=off で surface 由来の文脈が無くても、ナッジが単独で
-        additionalContext を発生させること。"""
+        """The nudge produces additionalContext on its own even with
+        surface_mode=off and no surface-derived context."""
         (engram_home / "config.toml").write_text(
             "surface_mode = 'off'\n", encoding="utf-8",
         )
@@ -316,8 +316,8 @@ class TestConsolidationNudgeViaUserPrompt:
         assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
 
     def test_user_prompt_no_nudge_below_threshold(self, engram_home, capsys):
-        """閾値未満のクラスタ数では additionalContext が出ないこと
-        (surface も無関係のため何も出力されない)。"""
+        """No additionalContext is produced when the cluster count is below
+        the threshold (surface is also irrelevant here, so nothing is output)."""
         (engram_home / "config.toml").write_text(
             "surface_mode = 'off'\n", encoding="utf-8",
         )
@@ -339,8 +339,8 @@ class TestConsolidationNudgeViaUserPrompt:
 class TestSessionEndWritesConsolidationState:
     def test_run_session_end_writes_state_file(self, engram_home, tmp_path,
                                                 monkeypatch):
-        """run_session_end が auto-encode 後に consolidation_state.json を書き、
-        clusters キーを持つこと(consolidate_nudge が既定 True の場合)。"""
+        """run_session_end writes consolidation_state.json after auto-encoding,
+        and it has a clusters key (when consolidate_nudge defaults to True)."""
         import engram.engine
         monkeypatch.setattr(engram.engine, "build_engine", _fake_build_engine)
 
@@ -363,17 +363,17 @@ class TestSessionEndWritesConsolidationState:
 
 
 # ---------------------------------------------------------------------------
-# ④ スキル化候補の自動促し(skill nudge)
+# skill nudge (automatic prompt for skill-extraction candidates)
 # ---------------------------------------------------------------------------
 
 class TestSkillNudge:
-    """_skill_nudge の単体テスト(状態ファイルの読み書きのみ、エンジン不使用)。"""
+    """Unit tests for _skill_nudge (state file read/write only, no engine)."""
 
     def test_nudge_fires_when_clusters_at_threshold(self, engram_home):
-        """クラスタ数が閾値以上・最終促しが古ければ促し文が返ること。"""
+        """A nudge message is returned when the cluster count is at/above the threshold and the last nudge is old enough."""
         settings = get_settings()
         _write_consolidation_state(settings, {
-            "skill_clusters": 1,  # skill_nudge_min_clusters の既定値と同数
+            "skill_clusters": 1,  # same as the default value of skill_nudge_min_clusters
             "last_skill_nudged_at": NOW - 30 * DAY,
         })
 
@@ -384,7 +384,7 @@ class TestSkillNudge:
         assert "mark_consolidated" in msg
 
     def test_no_nudge_when_setting_disabled(self, engram_home):
-        """skill_nudge=False なら閾値・間隔を満たしていても促さないこと。"""
+        """Does not nudge when skill_nudge=False, even if the threshold and interval are met."""
         (engram_home / "config.toml").write_text(
             "skill_nudge = false\n", encoding="utf-8",
         )
@@ -396,21 +396,21 @@ class TestSkillNudge:
         assert _skill_nudge(settings, now=NOW) is None
 
     def test_no_nudge_below_cluster_threshold(self, engram_home):
-        """クラスタ数が閾値未満なら促さないこと。"""
+        """Does not nudge when the cluster count is below the threshold."""
         settings = get_settings()
         _write_consolidation_state(settings, {
-            "skill_clusters": 0,  # min_clusters(既定1)未満
+            "skill_clusters": 0,  # below min_clusters (default 1)
             "last_skill_nudged_at": NOW - 30 * DAY,
         })
 
         assert _skill_nudge(settings, now=NOW) is None
 
     def test_no_nudge_when_interval_not_elapsed(self, engram_home):
-        """最短間隔(既定7日)が経過していなければ促さないこと(再促しの抑制)。"""
+        """Does not nudge when the minimum interval (default 7 days) has not elapsed (suppresses re-nudging)."""
         settings = get_settings()
         _write_consolidation_state(settings, {
             "skill_clusters": 2,
-            "last_skill_nudged_at": NOW - 1 * DAY,  # 7日未満しか経っていない
+            "last_skill_nudged_at": NOW - 1 * DAY,  # less than 7 days have passed
         })
 
         assert _skill_nudge(settings, now=NOW) is None
@@ -419,8 +419,8 @@ class TestSkillNudge:
 class TestSessionEndWritesSkillClusters:
     def test_run_session_end_writes_skill_clusters(self, engram_home, tmp_path,
                                                      monkeypatch):
-        """run_session_end が auto-encode 後に skill_clusters を状態ファイルへ
-        書くこと(skill_nudge が既定 True の場合)。"""
+        """run_session_end writes skill_clusters to the state file after
+        auto-encoding (when skill_nudge defaults to True)."""
         import engram.engine
         monkeypatch.setattr(engram.engine, "build_engine", _fake_build_engine)
 
@@ -442,7 +442,7 @@ class TestSessionEndWritesSkillClusters:
 
 
 class TestSkillNudgeViaUserPrompt:
-    """run_user_prompt を通じたスキル化候補ナッジの結線テスト。"""
+    """Wiring test for the skill-extraction-candidate nudge via run_user_prompt."""
 
     def test_user_prompt_emits_skill_nudge(self, engram_home, capsys):
         (engram_home / "config.toml").write_text(
@@ -465,8 +465,8 @@ class TestSkillNudgeViaUserPrompt:
         assert "skill_candidates" in ctx
 
     def test_consolidation_and_skill_nudge_both_present(self, engram_home, capsys):
-        """統合とスキル化の両方の促し条件が揃えば、両方とも additionalContext に
-        入ること。"""
+        """When both the consolidation and skill-extraction nudge conditions
+        are met, both appear in additionalContext."""
         (engram_home / "config.toml").write_text(
             "surface_mode = 'off'\n", encoding="utf-8",
         )
@@ -490,7 +490,7 @@ class TestSkillNudgeViaUserPrompt:
 
 
 # ---------------------------------------------------------------------------
-# フック登録(setup)
+# Hook registration (setup)
 # ---------------------------------------------------------------------------
 
 def test_register_claude_hooks_creates_file(tmp_path):
@@ -512,7 +512,7 @@ def test_register_claude_hooks_idempotent(tmp_path):
     before = settings_path.read_text(encoding="utf-8")
     ok, msg = register_claude_hooks(settings_path, exe)
     assert ok
-    assert "スキップ" in msg
+    assert "skipped" in msg
     assert settings_path.read_text(encoding="utf-8") == before
 
 
@@ -525,10 +525,10 @@ def test_register_claude_hooks_updates_stale_path(tmp_path):
     assert ok
     data = json.loads(settings_path.read_text(encoding="utf-8"))
     cmd = data["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
-    # フルパスで比較する("old" の部分文字列検査は macOS の一時パス
-    # /var/folders/... に誤反応した実例がある)
+    # Compare full paths (a substring check for "old" was observed to
+    # false-positive on macOS temp paths like /var/folders/...)
     assert str(new_exe) in cmd and str(old_exe) not in cmd
-    # エントリが増殖していない
+    # No duplicate entries were created
     assert len(data["hooks"]["SessionEnd"]) == 1
 
 
@@ -561,7 +561,7 @@ def test_register_claude_hooks_refuses_broken_json(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# config.toml の dict(セクション)往復
+# config.toml round-trip of a dict (section)
 # ---------------------------------------------------------------------------
 
 def test_config_toml_roundtrip_with_room_paths(tmp_path):
@@ -576,7 +576,7 @@ def test_config_toml_roundtrip_with_room_paths(tmp_path):
     assert data["room_paths"]["C:/Users/me/work"] == "work"
     assert data["room_paths"]["H:/マイドライブ/個人"] == "personal"
 
-    # merge してもセクションが保持される
+    # The section is preserved even after merging
     merge_config_toml(cfg, {"surface_mode": "active"})
     data = read_config_toml(cfg)
     assert data["surface_mode"] == "active"
@@ -584,7 +584,7 @@ def test_config_toml_roundtrip_with_room_paths(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# mark_consolidated ツールが促し用の状態を即時更新する(server 経由)
+# The mark_consolidated tool immediately updates the nudge state (via server)
 # ---------------------------------------------------------------------------
 
 
@@ -610,15 +610,15 @@ class TestMarkConsolidatedRefreshesState:
                 }
 
             def consolidation_candidates(self):
-                # 統合後は1クラスタだけ残っている想定
+                # Assumes only 1 cluster remains after consolidation
                 return {"clusters": [{"ids": ["a", "b"], "contents": ["x", "y"]}]}
 
             def skill_candidates(self):
-                # スキル化候補側も1クラスタだけ残っている想定
+                # Assumes only 1 cluster remains for skill candidates too
                 return {"clusters": [{"ids": ["c", "d"], "contents": ["y", "z"]}]}
 
         monkeypatch.setattr(server, "_engine", _FakeEngine())
-        # 事前状態: 統合前の古いクラスタ数
+        # Prior state: stale cluster count from before consolidation
         _write_consolidation_state(
             settings, {"clusters": 5, "skill_clusters": 9, "checked_at": 0.0}
         )
@@ -627,5 +627,5 @@ class TestMarkConsolidatedRefreshesState:
 
         assert result["status"] == "ok"
         state = _read_consolidation_state(settings)
-        assert state["clusters"] == 1  # 5 のまま放置されない
-        assert state["skill_clusters"] == 1  # 9 のまま放置されない(スキル化候補側も更新)
+        assert state["clusters"] == 1  # not left stuck at 5
+        assert state["skill_clusters"] == 1  # not left stuck at 9 (skill candidates side is also updated)

@@ -1,11 +1,15 @@
-"""埋め込み層。本番は Ruri-v3(ローカル・日本語特化)、テストは FakeEmbedder。
+"""Embedding layer. The default model is sentence-transformers/all-MiniLM-L6-v2;
+Ruri-v3 (local, Japanese-specialized) remains available via config. Tests use
+FakeEmbedder.
 
-実行系は2系統:
-- OnnxRuriEmbedder — ONNX Runtime。import+ロードが1〜2秒で軽く、これが既定。
-  `engram export-onnx` が生成したモデルディレクトリ(meta.json 付き)を読む。
-- RuriEmbedder — sentence-transformers(torch)。import だけで warm 12〜24秒 /
-  cold 50秒超かかる(server.py の ENGRAM_PRELOAD コメント参照)。ONNX モデルが
-  未生成の環境でのフォールバック、および export-onnx のパリティ検証の基準。
+Two runtime backends:
+- OnnxRuriEmbedder — ONNX Runtime. Import+load is light (1-2s); this is the
+  default. Reads the model directory (with meta.json) produced by
+  `engram export-onnx`.
+- RuriEmbedder — sentence-transformers (torch). Import alone takes 12-24s warm /
+  50s+ cold (see the ENGRAM_PRELOAD comment in server.py). Used as a fallback
+  when no ONNX model has been exported yet, and as the reference for
+  export-onnx's parity check.
 """
 
 from __future__ import annotations
@@ -27,15 +31,16 @@ class Embedder(Protocol):
 
 
 def mean_pool_normalize(hidden: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """attention mask で重み付き平均プーリングして L2 正規化する。
+    """Mean-pool over the attention mask, weighted, then L2-normalize.
 
-    sentence-transformers の Pooling(pooling_mode_mean_tokens=True) +
-    encode(normalize_embeddings=True) と同じ計算。ONNX 経路でも torch 経路と
-    同一のベクトル分布になることをパリティテストで保証する(db の dim 固定と
-    既存ベクトルとの互換のため、この関数は安易に変更しないこと)。
+    Matches sentence-transformers' Pooling(pooling_mode_mean_tokens=True) +
+    encode(normalize_embeddings=True). The parity test guarantees the ONNX path
+    produces the same vector distribution as the torch path (the db's dim is
+    fixed and existing vectors depend on it, so do not change this function
+    lightly).
 
-    hidden: (batch, seq, dim) の最終隠れ状態
-    mask:   (batch, seq) の attention mask(0/1)
+    hidden: (batch, seq, dim) final hidden state
+    mask:   (batch, seq) attention mask (0/1)
     """
     m = mask.astype(np.float32)[:, :, np.newaxis]
     summed = (hidden.astype(np.float32) * m).sum(axis=1)
@@ -46,24 +51,28 @@ def mean_pool_normalize(hidden: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 
 class RuriEmbedder:
-    """cl-nagoya/ruri-v3 系。プレフィックス(検索クエリ:/検索文書:)必須。
+    """Wraps a sentence-transformers model (e.g. cl-nagoya/ruri-v3, or the
+    default all-MiniLM-L6-v2). Query/doc prefixes are configurable — the
+    Ruri family requires them (search query:/search document:), while the
+    default model uses empty prefixes.
 
-    sentence-transformers は重いので遅延ロード。stdio MCP サーバーは常駐
-    プロセスなのでロードは初回のみ。
+    sentence-transformers is heavy, so loading is lazy. The stdio MCP server
+    is a long-lived process, so the model is only loaded once.
     """
 
     def __init__(
         self,
-        model_name: str = "cl-nagoya/ruri-v3-130m",
-        query_prefix: str = "検索クエリ: ",
-        doc_prefix: str = "検索文書: ",
+        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        query_prefix: str = "",
+        doc_prefix: str = "",
     ) -> None:
         self._model_name = model_name
         self._query_prefix = query_prefix
         self._doc_prefix = doc_prefix
         self._model = None
-        # FastMCP は同期ツールをワーカースレッドで実行する。background 先読みと
-        # 初回ツール呼び出しが競合してもモデルを二重ロードしないよう保護する。
+        # FastMCP runs synchronous tools on worker threads. This lock prevents
+        # double-loading the model if background preloading races with the
+        # first tool call.
         self._lock = threading.Lock()
 
     def _load(self):
@@ -75,29 +84,33 @@ class RuriEmbedder:
                 import os
                 import sys
 
-                # HF Hub への接続確認はネットワーク不調時に無限に待つことがあり、
-                # stdio MCP サーバーでは recall がハングしてセッションごと固まる。
-                # キャッシュ済みならオフラインで即ロードし、無い時だけ取りに行く。
+                # Checking connectivity to the HF Hub can hang indefinitely on
+                # a flaky network, which would freeze recall (and the whole
+                # session) on a stdio MCP server. Load offline immediately if
+                # the model is already cached, and only reach the network
+                # when it isn't.
                 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
                 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
                 from sentence_transformers import SentenceTransformer
 
-                # stdio MCP では stdout は JSON-RPC 専用。ライブラリの迷い出力が
-                # 混ざるとプロトコルが壊れるため、ロード中は stderr に退避する
+                # On a stdio MCP server, stdout is reserved for JSON-RPC.
+                # Stray output from the library would corrupt the protocol,
+                # so redirect it to stderr while loading.
                 with contextlib.redirect_stdout(sys.stderr):
                     try:
                         self._model = SentenceTransformer(
                             self._model_name, local_files_only=True
                         )
                     except Exception:
-                        # キャッシュ未取得の初回のみオンラインでダウンロード
+                        # Download online only on the very first run, before
+                        # the cache is populated
                         self._model = SentenceTransformer(self._model_name)
         return self._model
 
     @property
     def dim(self) -> int:
         model = self._load()
-        # sentence-transformers の新旧バージョン互換
+        # Compatible with both old and new sentence-transformers versions
         getter = getattr(model, "get_embedding_dimension", None) or getattr(
             model, "get_sentence_embedding_dimension"
         )
@@ -117,18 +130,20 @@ class RuriEmbedder:
 
 
 class OnnxRuriEmbedder:
-    """`engram export-onnx` が生成した ONNX モデルで埋め込む(既定の実行系)。
+    """Embeds using the ONNX model produced by `engram export-onnx` (the
+    default runtime backend).
 
-    torch を一切 import しないため、cold でも数秒で立ち上がる。モデル
-    ディレクトリには model.onnx / tokenizer.json / meta.json が必要で、
-    meta.json から dim を読むためモデルをロードせずに DB を開ける。
+    Never imports torch, so it starts up in seconds even on a cold start. The
+    model directory must contain model.onnx / tokenizer.json / meta.json;
+    dim is read from meta.json, so the DB can be opened without loading the
+    model.
     """
 
     def __init__(
         self,
         model_dir: Path,
-        query_prefix: str = "検索クエリ: ",
-        doc_prefix: str = "検索文書: ",
+        query_prefix: str = "",
+        doc_prefix: str = "",
     ) -> None:
         self._dir = Path(model_dir)
         self._query_prefix = query_prefix
@@ -141,7 +156,8 @@ class OnnxRuriEmbedder:
 
     @classmethod
     def is_available(cls, model_dir: Path) -> bool:
-        # 実体は config.onnx_model_ready(軽量 import で使えるようそちらに置く)
+        # Delegates to config.onnx_model_ready (kept there so it stays a
+        # lightweight import)
         from .config import onnx_model_ready
 
         return onnx_model_ready(model_dir)
@@ -173,8 +189,8 @@ class OnnxRuriEmbedder:
                 )
 
                 opts = ort.SessionOptions()
-                # stdio MCP では stdout が JSON-RPC 専用のため、ORT の警告類も
-                # 出力に混ぜない(3 = ERROR 以上のみ)
+                # stdout is reserved for JSON-RPC on a stdio MCP server, so
+                # keep ORT's warnings out of it too (3 = ERROR and above only)
                 opts.log_severity_level = 3
                 self._session = ort.InferenceSession(
                     str(self._dir / "model.onnx"),
@@ -213,17 +229,21 @@ class OnnxRuriEmbedder:
 
 
 def make_embedder(settings) -> Embedder:
-    """settings.embed_backend に従って実行系を選ぶ(build_engine から使う)。
+    """Selects the runtime backend according to settings.embed_backend (used
+    by build_engine).
 
-    auto  — ONNX モデルが生成済みならそれを使い、無ければ torch にフォールバック
-    onnx  — ONNX を強制。モデル未生成ならエラー(暗黙の torch 起動 12〜24秒を防ぐ)
-    torch — sentence-transformers を強制(export-onnx のパリティ基準もこれ)
+    auto  — use the ONNX model if it has already been exported, otherwise
+            fall back to torch
+    onnx  — force ONNX; error if no model has been exported (avoids an
+            implicit 12-24s torch startup)
+    torch — force sentence-transformers (also the parity reference for
+            export-onnx)
     """
     backend = getattr(settings, "embed_backend", "auto")
     onnx_dir = settings.onnx_model_dir
     if backend not in ("auto", "onnx", "torch"):
         raise ValueError(
-            f"embed_backend が不正です: {backend!r} (auto | onnx | torch)"
+            f"Invalid embed_backend: {backend!r} (auto | onnx | torch)"
         )
     if backend in ("auto", "onnx") and OnnxRuriEmbedder.is_available(onnx_dir):
         return OnnxRuriEmbedder(
@@ -233,8 +253,8 @@ def make_embedder(settings) -> Embedder:
         )
     if backend == "onnx":
         raise FileNotFoundError(
-            f"ONNX モデルがありません: {onnx_dir}\n"
-            "`engram export-onnx` で生成してください(追加の依存は不要)"
+            f"No ONNX model found: {onnx_dir}\n"
+            "Generate one with `engram export-onnx` (no extra dependencies required)"
         )
     return RuriEmbedder(
         model_name=settings.embed_model,
@@ -244,10 +264,12 @@ def make_embedder(settings) -> Embedder:
 
 
 class FakeEmbedder:
-    """テスト用の決定的埋め込み。文字 n-gram (1..3) の feature hashing。
+    """Deterministic embedding for tests. Feature hashing over character
+    n-grams (1..3).
 
-    部分文字列を共有するテキスト同士はベクトルも近くなるため、
-    類似度に依存するテスト(重複検知・近傍検索)がモデル無しで書ける。
+    Texts that share substrings end up with nearby vectors, which lets
+    similarity-dependent tests (duplicate detection, nearest-neighbor
+    search) run without a real model.
     """
 
     def __init__(self, dim: int = 64) -> None:

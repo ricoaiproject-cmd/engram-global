@@ -1,4 +1,4 @@
-"""記憶の部屋(room)のテスト: 解決ロジック・store往復・DBマイグレーション・recallフィルタ。"""
+"""Tests for memory rooms: resolution logic, store round-trip, DB migration, and recall filtering."""
 
 from __future__ import annotations
 
@@ -42,13 +42,13 @@ def test_resolve_room_separator_and_case_insensitive():
 
 
 def test_resolve_room_no_partial_component_match():
-    # "work" と "workspace" は別物(プレフィックスは要素境界で判定)
+    # "work" and "workspace" are different (prefix match is on path-component boundaries)
     rooms = {"C:/work": "work"}
     assert resolve_room("C:/workspace", rooms) == "common"
 
 
 # ---------------------------------------------------------------------------
-# store: frontmatter 往復
+# store: frontmatter round-trip
 # ---------------------------------------------------------------------------
 
 def test_store_room_roundtrip(tmp_path):
@@ -60,7 +60,7 @@ def test_store_room_roundtrip(tmp_path):
 
 
 def test_store_room_default_for_legacy_files(tmp_path):
-    # room の無い既存ファイル(v0.2 以前)は common として読む
+    # Existing files without a room (pre-v0.2) are read as "common"
     store = MarkdownStore(tmp_path / "memories")
     rec = store.create(content="旧形式", type="knowledge", importance=5)
     text = rec.path.read_text(encoding="utf-8")
@@ -73,12 +73,12 @@ def test_store_room_default_for_legacy_files(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# db: マイグレーションとフィルタ
+# db: migration and filtering
 # ---------------------------------------------------------------------------
 
 def test_db_migration_adds_room_column(tmp_path):
     db_path = tmp_path / "index.db"
-    # v0.2 相当の旧スキーマを手で作る
+    # Manually build a v0.2-equivalent legacy schema
     conn = sqlite3.connect(str(db_path))
     conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
     conn.execute("INSERT INTO meta VALUES ('dim', '8')")
@@ -115,7 +115,7 @@ def test_db_room_filters(tmp_path):
     engine = _make_engine(tmp_path)
     engine.remember("仕事の記憶アルファ", "knowledge", 5, room="work")
     engine.remember("個人の記憶ベータ", "knowledge", 5, room="personal")
-    engine.remember("共通の記憶ガンマ", "knowledge", 5)  # room 省略 = common
+    engine.remember("共通の記憶ガンマ", "knowledge", 5)  # room omitted = common
 
     rows = engine.db.all_memories(rooms=["work"])
     assert {r["room"] for r in rows} == {"work"}
@@ -131,7 +131,7 @@ def test_recall_room_isolation(tmp_path):
                     room="personal")
     engine.remember("文章は敬体で書く", "preference", 5)  # common
 
-    # work の部屋からは personal が見えない(common は見える)
+    # From the "work" room, "personal" is not visible (but "common" is)
     result = engine.recall("予算要求の書式", room="work", record_hits=False)
     rooms = {h["room"] for h in result["hits"]}
     assert "personal" not in rooms
@@ -140,11 +140,11 @@ def test_recall_room_isolation(tmp_path):
     ids_rooms = {h["room"] for h in result["hits"]}
     assert "personal" not in ids_rooms
 
-    # room 指定なし(None)は従来どおり全部見える
+    # No room specified (None) still sees everything, as before
     result = engine.recall("サムネイルの色", record_hits=False)
     assert any(h["room"] == "personal" for h in result["hits"])
 
-    # room="*" も全部屋
+    # room="*" also means every room
     result = engine.recall("サムネイルの色", room="*", record_hits=False)
     assert any(h["room"] == "personal" for h in result["hits"])
 
@@ -153,10 +153,10 @@ def test_remember_dup_detection_is_room_scoped(tmp_path):
     engine = _make_engine(tmp_path)
     r1 = engine.remember("全く同じ内容の記憶", "knowledge", 5, room="work")
     assert r1["status"] == "created"
-    # 同部屋 → 重複強化
+    # Same room -> duplicate reinforcement
     r2 = engine.remember("全く同じ内容の記憶", "knowledge", 5, room="work")
     assert r2["status"] == "duplicate_reinforced"
-    # 別部屋 → 併合しない(文脈分離)
+    # Different room -> not merged (context isolation)
     r3 = engine.remember("全く同じ内容の記憶", "knowledge", 5, room="personal")
     assert r3["status"] == "created"
 
@@ -173,7 +173,7 @@ def test_correct_inherits_room(tmp_path):
 def test_reindex_preserves_room(tmp_path):
     engine = _make_engine(tmp_path)
     r1 = engine.remember("部屋付きの記憶", "knowledge", 5, room="work")
-    engine.db.delete_memory(r1["id"])  # DB から消して再構築させる
+    engine.db.delete_memory(r1["id"])  # remove from DB so it gets rebuilt
     engine.reindex()
     mem = engine.db.get_memory(r1["id"])
     assert mem is not None

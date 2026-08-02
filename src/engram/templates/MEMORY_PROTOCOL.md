@@ -1,94 +1,124 @@
-# 記憶プロトコル(engram)
+# Memory Protocol (engram)
 
-あなた(AIエージェント)は `engram` MCP サーバー経由で永続記憶を持つ。
-人間の記憶と同じく「使うほど思い出しやすくなり、使わないと沈むが消えない」。
-この記憶はあなたが育てるものであり、以下を必ず実行すること。
-対象はあらゆる仕事(文書作成・調査・企画・事務・開発など)に共通する。
+You (the AI agent) have persistent memory via the `engram` MCP server.
+Like human memory, "the more you use it, the easier it is to recall; the less
+you use it, it fades but never disappears." This memory is yours to grow, and
+you must follow the rules below.
+This applies to all kinds of work in common (writing, research, planning,
+administration, development, etc.).
 
-## 1. タスク開始時 — recall
+## 1. At the start of a task — recall
 
-- 作業に着手する前に、タスクの主題で `recall` を呼び、関連する過去の知見・
-  ユーザーの流儀・仕事の文脈を確認する。
-- 思い当たる記憶があるのに fast で出てこない場合は `mode: "deep"` で再検索する
-  (連想リンクを辿り、古い記憶・統合済みエピソードまで探索する)。
-- それでも出てこないが「確かに記録したはず」と強く疑うときは、最終手段として
-  `mode: "exhaustive"` を使う。活性度を無視し関連度だけで全記憶を総当たりするので、
-  長く使われず沈んだ記憶も意味的に近ければ必ず浮上する。
-- exhaustive でも出ず、なお存在を確信する場合に限り、記憶ストア(config の
-  `memories_dir`)の Markdown を直接 grep して確認してから「無い」と結論する。
-  recall の上位に出ないことは「存在しない」を意味しない。
+- Before starting work, call `recall` with the task's subject to check for
+  relevant past knowledge, the user's conventions, and work context.
+- If you suspect a relevant memory exists but it doesn't surface with fast
+  mode, search again with `mode: "deep"` (this follows associative links and
+  explores older memories and consolidated episodes).
+- If it still doesn't surface, and you strongly suspect "this must have been
+  recorded," use `mode: "exhaustive"` as a last resort. This ignores
+  activation and brute-forces all memories by relevance alone, so even
+  memories that have long gone unused and faded will surface if they are
+  semantically close.
+- Only if it still doesn't turn up even with exhaustive mode, and you remain
+  convinced it exists, grep the memory store's Markdown directly (the
+  config's `memories_dir`) to check before concluding it "doesn't exist."
+  Not appearing near the top of recall results does not mean "it doesn't
+  exist."
 
-## 2. 知見を得たら — remember
+## 2. When you gain insight — remember
 
-以下に該当したら、その場で `remember` する。セッション終了まで溜めない。
+When any of the following applies, call `remember` on the spot. Do not let it
+pile up until the end of the session.
 
-- 苦労して解決した問題の原因と解法(type: knowledge)
-  — 例: 手続きの通し方、ツールの落とし穴、バグの解法
-- 重要な判断とその理由、採用しなかった代替案(type: knowledge / project)
-- ユーザーの好み・流儀・指示の傾向(type: preference)
-  — 例: 文書の様式、説明の深さ、コードスタイル、確認の取り方
-- 仕事の目的・制約・経緯・関係者など、資料からは読み取れない背景(type: project)
-- セッションでやったことの要約(type: episode)— 区切りの良いタイミングで1件
+- The cause and solution of a problem you struggled to solve (type:
+  knowledge) — e.g., how to get a procedure working, a tool's gotcha, a bug's
+  fix
+- An important decision and its rationale, and alternatives not taken (type:
+  knowledge / project)
+- The user's preferences, conventions, and instruction tendencies (type:
+  preference) — e.g., document formatting, depth of explanation, code style,
+  how they like to be asked for confirmation
+- Background not derivable from the source material, such as the purpose,
+  constraints, history, or stakeholders of the work (type: project)
+- A summary of what was done in the session (type: episode) — one entry, at
+  a natural breakpoint
 
-**importance(1–10)の採点基準** — 符号化の深さが変わる。正直に採点すること:
+**Importance (1-10) scoring criteria** — this changes how deeply the memory
+is encoded. Score honestly:
 
-| 状況 | importance |
+| Situation | importance |
 |---|---|
-| 重大な実害(データ消失・誤送信・本番障害・締切事故等)を伴う失敗の教訓 | 9–10 |
-| ユーザーからの明示的な訂正・指摘・強い要望 | 8–9 |
-| 長時間の試行錯誤の末に判明した非自明な原因・解法 | 7–8 |
-| 再利用しそうな判断・有用な知見 | 5–6 |
-| ありふれた作業メモ・些末な事実 | 2–4 |
+| A lesson from a failure involving serious real-world harm (data loss, message sent to the wrong recipient, production outage, missed deadline, etc.) | 9-10 |
+| An explicit correction, complaint, or strong request from the user | 8-9 |
+| A non-obvious cause or solution discovered only after extensive trial and error | 7-8 |
+| A reusable decision or useful insight | 5-6 |
+| A routine work note or trivial fact | 2-4 |
 
-- 1記憶 = 1事実(原子的に)。複数の知見は分けて remember する。
-- 既知の関連記憶があれば `related_ids` でリンクする。
+- One memory = one fact (atomic). Split multiple insights into separate
+  `remember` calls.
+- If a related memory is already known, link it via `related_ids`.
 
-## 3. タスク完了時 — reinforce
+## 3. At the end of a task — reinforce
 
-- recall した記憶のうち**実際に役立ったものの id** を `reinforce` で報告する。
-  これが記憶の定着(活性化)とヘッブ結合(連想網の形成)の主要な栄養になる。
-- 「この記憶のおかげで重大なミスを回避できた」級の決定的な貢献は
-  `strength: 2.0`〜`3.0`。
-- 役立たなかった記憶は何もしない(自然に沈んでいく)。
+- Report the ids of memories from your `recall` results that **actually
+  helped**, via `reinforce`. This is the primary nourishment for memory
+  consolidation (activation) and Hebbian bonding (forming the associative
+  network).
+- For a decisive contribution — the level of "this memory helped me avoid a
+  serious mistake" — use `strength: 2.0` to `3.0`.
+- Do nothing for memories that didn't help (they will naturally fade on
+  their own).
 
-## 4. 間違いに気づいたら — correct(forget ではない)
+## 4. When you notice a mistake — correct (not forget)
 
-- 記憶の内容が誤っていた、またはユーザーに訂正されたら、**必ず `correct`** を使う。
-  `forget` で消してはいけない。何を間違えたかを覚えていることが再発防止になる
-  (訂正は最も深く刻まれる記憶として扱われる)。
-- `reason` には訂正の根拠を具体的に書く。
+- If a memory's content turns out to be wrong, or the user corrects it, you
+  **must use `correct`**. Do not delete it with `forget`. Remembering what
+  you got wrong is what prevents the same mistake from recurring (a
+  correction is treated as the most deeply encoded kind of memory).
+- Write the specific basis for the correction in `reason`.
 
-## 5. 自発的想起と自動記憶(フック対応環境のみ)
+## 5. Spontaneous recall and automatic memory (hook-enabled environments only)
 
-- 文脈に「(engram 自発的想起)」として記憶が差し込まれることがある。これは
-  あなたが recall したものではなく、記憶基盤が自分から思い出したものである。
-  **実際に役立った場合のみ** その id を `reinforce` する。誤っていれば
-  `correct`、無関係なら黙って無視する(無理に使わない)。
-- セッション終了時の要約 episode はフックが自動保存する環境がある。その場合も
-  本プロトコルの remember は省略しない — 自動要約は粗い記録であり、
-  知見・好み・訂正はその場で remember するのが正である。
-- 文脈に「(engram 記憶整理)」として統合の促し(consolidation nudge)が
-  差し込まれることがある。これは古い episode 記憶が一定クラスタ数以上溜まった
-  ときに自動で届く合図であり、無視してよい通知ではない。**区切りの良い
-  タイミングで**必ず対応すること: `consolidation_candidates` を呼び、
-  返ってきたクラスタごとに内容を要約して `remember`(type=knowledge、
-  元クラスタの経緯を残す)で保存し、`mark_consolidated(episode_ids, new_memory_id)`
-  で元 episode を降格する。これは人間でいう睡眠中の記憶整理に相当する保守作業で、
-  あなたにしかできない(engram 自身は要約できない)。
-- 文脈に「(engram スキル化候補)」という促しが差し込まれることがある。これは
-  同じ形の作業を記録した episode が一定件数以上(既定3件・三度ルール)似た
-  クラスタを成したという合図である。**区切りの良いタイミングで**対応する
-  こと: `skill_candidates` を呼び、返ってきたクラスタの episode 群が実際に
-  同じ形の手順であれば、スキル(再利用可能な手順書。Claude Code なら
-  SKILL.md 等)として切り出す価値があるかを判断し、**ユーザーに提案する**。
-  勝手にスキルを作成・配備してはならない。採用/見送りいずれの結論でも、
-  経緯を `remember`(type=knowledge)で記録し、`mark_consolidated(episode_ids,
-  new_memory_id)` で元 episode を降格して整理する。
+- A memory may be injected into context labeled "(engram spontaneous
+  recall)." This is not something you called `recall` for — it is something
+  the memory substrate surfaced on its own. `reinforce` its id **only if it
+  actually helped**. If it was wrong, use `correct`; if it's irrelevant,
+  silently ignore it (don't force a use for it).
+- Some environments have a hook that automatically saves an end-of-session
+  summary episode. Even then, do not skip the `remember` calls from this
+  protocol — an automatic summary is a coarse record; insights, preferences,
+  and corrections should still be `remember`ed on the spot as the correct
+  practice.
+- A consolidation nudge may be injected into context labeled "(engram
+  memory consolidation)." This is an automatic signal that arrives when old
+  episode memories have accumulated into a cluster above a certain size, and
+  it is not a notification you may ignore. **At a natural breakpoint**, you
+  must act on it: call `consolidation_candidates`, and for each returned
+  cluster, summarize its content and save it with `remember` (type=knowledge,
+  preserving the history of the original cluster), then demote the original
+  episodes with `mark_consolidated(episode_ids, new_memory_id)`. This is
+  maintenance work equivalent to memory consolidation during human sleep,
+  and only you can do it (engram itself cannot summarize).
+- A prompt may be injected into context labeled "(engram skill candidate)."
+  This is a signal that episodes recording the same shape of work have
+  formed a similar cluster at or above a certain count (default 3 — the
+  "rule of three"). **At a natural breakpoint**, act on it: call
+  `skill_candidates`, and if the episodes in the returned cluster are
+  indeed the same recurring procedure, judge whether it's worth extracting
+  as a skill (a reusable how-to document — e.g., a SKILL.md for Claude Code)
+  and **propose it to the user**. Never create or deploy a skill on your
+  own initiative. Regardless of whether the proposal is adopted or
+  declined, record the outcome via `remember` (type=knowledge), and clean up
+  by demoting the original episodes with `mark_consolidated(episode_ids,
+  new_memory_id)`.
 
-## 6. してはいけないこと
+## 6. Things you must not do
 
-- 機密情報(パスワード・APIキー・個人情報・要配慮情報)を remember しない。
-- 同じ内容を言い換えて何度も remember しない(重複は自動検知されるが、
-  最初から避ける)。
-- recall 結果を盲信しない。記憶は記録時点の事実であり、状況・ルール・コードは
-  変わっている可能性がある。検証してから使い、古ければ correct する。
+- Do not `remember` sensitive information (passwords, API keys, personal
+  information, or other information requiring special care).
+- Do not repeatedly `remember` the same content in different phrasing
+  (duplicates are auto-detected, but avoid creating them in the first
+  place).
+- Do not blindly trust `recall` results. Memories are facts as of when they
+  were recorded — the situation, rules, or code may have since changed.
+  Verify before use, and `correct` anything that's gone stale.

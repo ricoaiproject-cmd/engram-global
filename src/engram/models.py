@@ -1,4 +1,4 @@
-"""共有データ型。"""
+"""Shared data types."""
 
 from __future__ import annotations
 
@@ -13,35 +13,35 @@ LINK_KINDS = ("explicit", "co_recall", "derived_from", "superseded_by")
 
 @dataclass
 class MemoryRecord:
-    """記憶1件。正本は Markdown ファイル、DB はインデックス。"""
+    """A single memory. The Markdown file is the source of truth; the DB is just an index."""
 
     id: str                      # ULID
-    type: str                    # MEMORY_TYPES のいずれか
-    created: str                 # ISO 8601(ローカルTZ付き)
-    importance: int              # 1-10。呼び出し元エージェントが文脈から採点
+    type: str                    # one of MEMORY_TYPES
+    created: str                 # ISO 8601 (with local TZ)
+    importance: int              # 1-10, scored by the calling agent from context
     tags: list[str] = field(default_factory=list)
-    source: str = "unknown"      # claude-code / codex / antigravity 等
+    source: str = "unknown"      # claude-code / codex / antigravity / etc.
     tier: str = "hot"
-    links: list[str] = field(default_factory=list)  # リンク先 id のリスト
-    content: str = ""            # 本文(frontmatter を除く)
-    path: Path | None = None     # Markdown ファイルの絶対パス
-    content_hash: str = ""       # 本文の sha256(手編集検知用)
-    room: str = "common"         # 記憶の部屋(仕事/個人の文脈分離。既定は共通)
+    links: list[str] = field(default_factory=list)  # list of linked memory ids
+    content: str = ""            # body text (frontmatter excluded)
+    path: Path | None = None     # absolute path to the Markdown file
+    content_hash: str = ""       # sha256 of the body (for detecting manual edits)
+    room: str = "common"         # memory room (work/personal context separation; defaults to common)
 
 
 @dataclass
 class RecallHit:
-    """recall の結果1件。スコア内訳付きで返し、エージェントが判断できるようにする。"""
+    """A single recall result. Returned with a score breakdown so the agent can judge it."""
 
     id: str
     content: str
     type: str
     tags: list[str]
     tier: str
-    score: float                 # 最終スコア
-    relevance: float             # クエリとの意味的関連度(0-1)
-    activation: float            # 活性度(0-1 正規化)
+    score: float                 # final score
+    relevance: float             # semantic relevance to the query (0-1)
+    activation: float            # activation (normalized 0-1)
     importance: float            # importance/10
-    via: str = "direct"          # "direct" | "associative"(連想リンク経由)
-    note: str = ""               # 例: "→ [id] により訂正済み"
-    room: str = "common"         # 記憶の部屋
+    via: str = "direct"          # "direct" | "associative" (reached via an associative link)
+    note: str = ""               # e.g. "-> corrected by [id]"
+    room: str = "common"         # memory room

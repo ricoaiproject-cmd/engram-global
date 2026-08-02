@@ -1,14 +1,15 @@
-"""観測性(perf ログ)。
+"""Observability (perf log).
 
-MCP ツール呼び出しと起動時の先読み(preload)の所要時間を
-data_dir/perf/perf_log.jsonl に1行1 JSON で記録する。「調子が悪い」を
-体感ではなくデータで診断するための常時計測(settings.perf_log で on/off)。
+Records the duration of MCP tool calls and startup preload to
+data_dir/perf/perf_log.jsonl, one JSON object per line. Always-on
+instrumentation (toggled via settings.perf_log) for diagnosing "something
+feels slow" with data instead of gut feeling.
 
-ログ形式(固定契約。変更しないこと):
+Log format (fixed contract - do not change):
     {"ts": epoch float, "kind": "tool" | "preload", "name": str, "ms": float, "ok": bool}
 
-ローテーションやログ書き込み失敗時の振る舞いは surface.py の _append_log
-(記憶の自発的想起ログ)と揃えている。
+Rotation and write-failure behavior are kept consistent with surface.py's
+_append_log (the spontaneous-recall log).
 """
 
 from __future__ import annotations
@@ -25,9 +26,9 @@ _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 
 
 def append_perf(settings: Settings, entry: dict) -> None:
-    """perf ログへ1行追記する(ディレクトリ作成・ローテーション込み)。
+    """Append one line to the perf log (creates the directory and handles rotation).
 
-    ログ書き込みの失敗(OSError)は記憶基盤の可用性を損なわないよう握りつぶす。
+    Log write failures (OSError) are swallowed so they never affect the availability of the memory store.
     """
     d = settings.data_dir / "perf"
     try:
@@ -35,7 +36,7 @@ def append_perf(settings: Settings, entry: dict) -> None:
         log = d / "perf_log.jsonl"
         if log.is_file() and log.stat().st_size > _LOG_ROTATE_BYTES:
             log.replace(log.with_suffix(".jsonl.old"))
-        # 入力に不正なサロゲート等が紛れてもログ書き込みでは落とさない
+        # never let stray malformed surrogates etc. in the input break the log write
         with log.open("a", encoding="utf-8", errors="replace") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError:
@@ -44,11 +45,12 @@ def append_perf(settings: Settings, entry: dict) -> None:
 
 @contextmanager
 def timed(settings: Settings, kind: str, name: str) -> Iterator[None]:
-    """ブロックの所要時間を計測し、perf ログへ記録するコンテキストマネージャ。
+    """Context manager that times a block and records the duration to the perf log.
 
-    settings.perf_log が False ならタイマーすら回さず即座に何もしない(オーバー
-    ヘッドは bool 判定1回のみ)。ブロック内で例外が発生した場合は ok=False で
-    記録した上で、その例外を再送出する(呼び出し元の挙動は変えない)。
+    When settings.perf_log is False, the timer isn't even started - it's a
+    no-op (the only overhead is a single bool check). If an exception occurs
+    inside the block, it's recorded with ok=False and then re-raised
+    (behavior at the call site is unchanged).
     """
     if not settings.perf_log:
         yield

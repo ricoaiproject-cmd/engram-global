@@ -1,22 +1,23 @@
-"""動作確認用 CLI(担当: Agent B)。
+"""Smoke-test CLI (owner: Agent B).
 
-argparse のサブコマンドで engine を直接叩く。出力は人間可読(recall はスコア
-内訳を表形式)+ --json でそのまま JSON。
+Drives the engine directly through argparse subcommands. Output is
+human-readable by default (recall shows a score breakdown table),
+or raw JSON with --json.
 
-    engram remember "本文" --type knowledge --importance 7 --tags a,b
-    engram recall "クエリ" [--deep] [--limit 5] [--type knowledge] [--no-record]
+    engram remember "text" --type knowledge --importance 7 --tags a,b
+    engram recall "query" [--deep] [--limit 5] [--type knowledge] [--no-record]
     engram reinforce ID [ID...] [--strength 2.0]
-    engram correct ID --content "正しい内容" --reason "理由"
+    engram correct ID --content "corrected text" --reason "reason"
     engram forget ID / engram link SRC DST
     engram stats / engram reindex
     engram consolidation-candidates
-    engram mark-consolidated NEW_ID --episodes ID1,ID2,...  統合完了を記録する
-    engram skill-candidates              スキル化候補の episode クラスタを表示する
-    engram surface "発話" [--room X]     自発的想起の手動確認(何も書き込まない)
-    engram hook session-end|user-prompt  エージェントのフック用入口(stdin JSON)
-    engram export-onnx [--force]         埋め込みモデルの ONNX 化(起動高速化)
+    engram mark-consolidated NEW_ID --episodes ID1,ID2,...  record that consolidation is done
+    engram skill-candidates              show episode clusters that are skill candidates
+    engram surface "utterance" [--room X]     manual check of spontaneous recall (writes nothing)
+    engram hook session-end|user-prompt  entry point for agent hooks (JSON on stdin)
+    engram export-onnx [--force]         export the embedding model to ONNX (faster startup)
 
---fake-embedder フラグで FakeEmbedder を使う(モデル未導入環境での試験用)。
+Use the --fake-embedder flag to use FakeEmbedder (for testing without a model installed).
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ import sys
 
 
 def _build_engine(fake_embedder: bool = False):
-    """エンジンを構築する。--fake-embedder フラグに従い埋め込みを選択。"""
+    """Build the engine. Chooses the embedder based on the --fake-embedder flag."""
     from .config import get_settings
     from .engine import build_engine
     from .embedder import FakeEmbedder
@@ -39,7 +40,7 @@ def _build_engine(fake_embedder: bool = False):
 
 
 def _print_recall(result: dict, as_json: bool = False) -> None:
-    """recall 結果を整形して表示。"""
+    """Print recall results, formatted."""
     if as_json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
@@ -56,10 +57,10 @@ def _print_recall(result: dict, as_json: bool = False) -> None:
     print()
 
     if not hits:
-        print("  (結果なし)")
+        print("  (no results)")
         return
 
-    # カラム幅の計算
+    # Compute column widths
     col_id = 26
     col_score = 7
     col_rel = 7
@@ -68,7 +69,7 @@ def _print_recall(result: dict, as_json: bool = False) -> None:
     col_via = 12
     col_tier = 12
 
-    # ヘッダー行
+    # Header row
     print(
         f"{'ID':<{col_id}} "
         f"{'score':>{col_score}} "
@@ -90,18 +91,18 @@ def _print_recall(result: dict, as_json: bool = False) -> None:
             f"{hit['via']:<{col_via}} "
             f"{hit['tier']:<{col_tier}}"
         )
-        # content のプレビュー(先頭80文字)
+        # Content preview (first 80 characters)
         content_preview = hit.get("content", "").replace("\n", " ")[:80]
         if content_preview:
             print(f"  > {content_preview}")
-        # note がある場合
+        # If a note is present
         if hit.get("note"):
             print(f"  [note] {hit['note']}")
         print()
 
 
 def _print_result(result: dict, as_json: bool = False) -> None:
-    """汎用 dict 出力。"""
+    """Generic dict output."""
     if as_json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
@@ -110,224 +111,224 @@ def _print_result(result: dict, as_json: bool = False) -> None:
 
 
 def main() -> None:
-    """CLI エントリーポイント。"""
+    """CLI entry point."""
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
     parser = argparse.ArgumentParser(
         prog="engram",
-        description="engram 記憶エンジン CLI",
+        description="engram memory engine CLI",
     )
     parser.add_argument(
         "--fake-embedder",
         action="store_true",
-        help="FakeEmbedder を使う(モデル未導入環境での試験用)",
+        help="Use FakeEmbedder (for testing without a model installed)",
     )
     parser.add_argument(
         "--json",
         action="store_true",
         dest="as_json",
-        help="JSON 出力",
+        help="JSON output",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # --- remember ---
-    p_remember = subparsers.add_parser("remember", help="記憶を保存する")
-    p_remember.add_argument("content", help="記憶の本文")
+    p_remember = subparsers.add_parser("remember", help="Save a memory")
+    p_remember.add_argument("content", help="Memory content")
     p_remember.add_argument(
         "--type",
         default="knowledge",
         choices=["knowledge", "preference", "project", "episode"],
-        help="記憶のタイプ(デフォルト: knowledge)",
+        help="Memory type (default: knowledge)",
     )
     p_remember.add_argument(
         "--importance",
         type=int,
         default=5,
-        help="重要度 1-10(デフォルト: 5)",
+        help="Importance 1-10 (default: 5)",
     )
     p_remember.add_argument(
         "--tags",
         default="",
-        help="カンマ区切りのタグ",
+        help="Comma-separated tags",
     )
     p_remember.add_argument(
         "--source",
         default="cli",
-        help="記憶の出所",
+        help="Origin of the memory",
     )
     p_remember.add_argument(
         "--related",
         dest="related_ids",
         default="",
-        help="関連記憶 ID のカンマ区切り",
+        help="Comma-separated IDs of related memories",
     )
     p_remember.add_argument(
         "--room",
         default=None,
-        help="記憶の部屋(省略時は現在のディレクトリから自動判定)",
+        help="Memory room (default: auto-detected from the current directory)",
     )
 
     # --- recall ---
-    p_recall = subparsers.add_parser("recall", help="記憶を検索する")
-    p_recall.add_argument("query", help="検索クエリ")
+    p_recall = subparsers.add_parser("recall", help="Search memories")
+    p_recall.add_argument("query", help="Search query")
     p_recall.add_argument(
         "--deep",
         action="store_true",
-        help="deep モードで検索(cold/superseded/episode も含む)",
+        help="Search in deep mode (also includes cold/superseded/episode)",
     )
     p_recall.add_argument(
         "--limit",
         type=int,
         default=5,
-        help="最大件数(デフォルト: 5)",
+        help="Maximum number of results (default: 5)",
     )
     p_recall.add_argument(
         "--type",
         default=None,
-        help="タイプでフィルタ",
+        help="Filter by type",
     )
     p_recall.add_argument(
         "--no-record",
         action="store_true",
-        help="recall_hit イベントを記録しない",
+        help="Do not record a recall_hit event",
     )
     p_recall.add_argument(
         "--room",
         default=None,
-        help='検索する部屋(省略時は現在のディレクトリから自動判定。"*" で全部屋)',
+        help='Room to search (default: auto-detected from the current directory; "*" for all rooms)',
     )
 
     # --- reinforce ---
-    p_reinforce = subparsers.add_parser("reinforce", help="記憶の使用を報告する")
-    p_reinforce.add_argument("ids", nargs="+", help="強化する記憶 ID のリスト")
+    p_reinforce = subparsers.add_parser("reinforce", help="Report that a memory was used")
+    p_reinforce.add_argument("ids", nargs="+", help="List of memory IDs to reinforce")
     p_reinforce.add_argument(
         "--strength",
         type=float,
         default=1.0,
-        help="強化の強さ 0.1-3.0(デフォルト: 1.0)",
+        help="Reinforcement strength 0.1-3.0 (default: 1.0)",
     )
 
     # --- correct ---
-    p_correct = subparsers.add_parser("correct", help="記憶を訂正する")
-    p_correct.add_argument("id", help="訂正する記憶 ID")
+    p_correct = subparsers.add_parser("correct", help="Correct a memory")
+    p_correct.add_argument("id", help="ID of the memory to correct")
     p_correct.add_argument(
         "--content",
         required=True,
-        help="正しい内容",
+        help="Corrected content",
     )
     p_correct.add_argument(
         "--reason",
         required=True,
-        help="訂正の理由",
+        help="Reason for the correction",
     )
     p_correct.add_argument(
         "--source",
         default="cli",
-        help="訂正の出所",
+        help="Origin of the correction",
     )
 
     # --- forget ---
-    p_forget = subparsers.add_parser("forget", help="記憶をゴミ箱へ移動する")
-    p_forget.add_argument("id", help="削除する記憶 ID")
+    p_forget = subparsers.add_parser("forget", help="Move a memory to the trash")
+    p_forget.add_argument("id", help="ID of the memory to delete")
 
     # --- link ---
-    p_link = subparsers.add_parser("link", help="2つの記憶をリンクする")
-    p_link.add_argument("src", help="リンク元の記憶 ID")
-    p_link.add_argument("dst", help="リンク先の記憶 ID")
+    p_link = subparsers.add_parser("link", help="Link two memories")
+    p_link.add_argument("src", help="Source memory ID")
+    p_link.add_argument("dst", help="Destination memory ID")
 
     # --- stats ---
-    subparsers.add_parser("stats", help="統計情報を表示する")
+    subparsers.add_parser("stats", help="Show statistics")
 
     # --- reindex ---
-    subparsers.add_parser("reindex", help="DB を Markdown から再構築する")
+    subparsers.add_parser("reindex", help="Rebuild the DB from Markdown")
 
     # --- consolidation-candidates ---
     subparsers.add_parser(
         "consolidation-candidates",
-        help="統合候補の episode クラスタを表示する",
+        help="Show episode clusters that are consolidation candidates",
     )
 
     # --- mark-consolidated ---
     p_mark_consolidated = subparsers.add_parser(
         "mark-consolidated",
-        help="統合完了を記録する(episode→new_memory_id のリンク+cold降格)",
+        help="Record that consolidation is done (link episode->new_memory_id + demote to cold)",
     )
     p_mark_consolidated.add_argument(
-        "new_memory_id", help="統合先(新規作成済み)の記憶 ID"
+        "new_memory_id", help="ID of the memory that consolidation merged into (already created)"
     )
     p_mark_consolidated.add_argument(
         "--episodes",
         required=True,
-        help="統合元 episode ID のカンマ区切り",
+        help="Comma-separated IDs of the source episodes being consolidated",
     )
 
     # --- skill-candidates ---
     subparsers.add_parser(
         "skill-candidates",
-        help="スキル化候補の episode クラスタを表示する",
+        help="Show episode clusters that are skill candidates",
     )
 
     # --- setup ---
-    p_setup = subparsers.add_parser("setup", help="セットアップウィザードを実行する")
+    p_setup = subparsers.add_parser("setup", help="Run the setup wizard")
     p_setup.add_argument(
         "--non-interactive",
         action="store_true",
-        help="質問せず既定値でセットアップ",
+        help="Set up with defaults, without prompting",
     )
     p_setup.add_argument(
         "--memories-dir",
         default=None,
-        help="記憶フォルダのパス(省略時は ~/.engram/memories)",
+        help="Path to the memories folder (default: ~/.engram/memories)",
     )
     p_setup.add_argument(
         "--agents",
         default=None,
         metavar="AGENTS",
-        help="登録するエージェントをカンマ区切りで指定(例: claude,codex)。省略時は検出された全部",
+        help="Comma-separated list of agents to register (e.g. claude,codex). Default: all detected agents",
     )
 
     # --- doctor ---
-    subparsers.add_parser("doctor", help="環境診断を表示する")
+    subparsers.add_parser("doctor", help="Show environment diagnostics")
 
     # --- export-onnx ---
     p_export = subparsers.add_parser(
         "export-onnx",
-        help="埋め込みモデルを ONNX 化して起動を高速化する(一度だけ実行)",
+        help="Export the embedding model to ONNX to speed up startup (run once)",
     )
     p_export.add_argument(
         "--force",
         action="store_true",
-        help="既存の ONNX モデルを上書きする",
+        help="Overwrite an existing ONNX model",
     )
 
     # --- surface ---
     p_surface = subparsers.add_parser(
         "surface",
-        help="自発的想起の手動確認(ログ・状態は書き込まない)",
+        help="Manual check of spontaneous recall (writes no logs or state)",
     )
-    p_surface.add_argument("query", help="発話(プロンプト)に相当するテキスト")
+    p_surface.add_argument("query", help="Text standing in for the utterance (prompt)")
     p_surface.add_argument(
         "--room",
         default=None,
-        help="部屋(省略時は現在のディレクトリから自動判定)",
+        help="Room (default: auto-detected from the current directory)",
     )
 
     # --- hook ---
     p_hook = subparsers.add_parser(
         "hook",
-        help="エージェントのフックから呼ばれる入口(stdin の JSON を読む)",
+        help="Entry point invoked by agent hooks (reads JSON from stdin)",
     )
     p_hook.add_argument(
         "event",
         choices=["session-end", "user-prompt"],
-        help="フックイベント名",
+        help="Hook event name",
     )
 
     args = parser.parse_args()
 
-    # setup / doctor はエンジン構築なしで動く
+    # setup / doctor run without building the engine
     if args.command == "setup":
         from .setup import parse_agents, setup_main
         memories_dir = None
@@ -339,7 +340,7 @@ def main() -> None:
             try:
                 selected_agents = parse_agents(args.agents)
             except ValueError as e:
-                print(f"エラー: {e}", file=sys.stderr)
+                print(f"Error: {e}", file=sys.stderr)
                 sys.exit(1)
         setup_main(
             memories_dir=memories_dir,
@@ -360,20 +361,20 @@ def main() -> None:
         try:
             report = export_onnx(get_settings(), force=args.force)
         except (ImportError, FileExistsError, RuntimeError) as e:
-            print(f"エラー: {e}", file=sys.stderr)
+            print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
         if args.as_json:
             print(json.dumps(report, ensure_ascii=False, indent=2))
         else:
-            print(f"ONNX モデルを生成しました: {report['target']}")
-            print(f"  モデル: {report['model']} (dim={report['dim']}, "
+            print(f"ONNX model generated: {report['target']}")
+            print(f"  Model: {report['model']} (dim={report['dim']}, "
                   f"{report['onnx_size_mb']} MB)")
-            print(f"  パリティ: min cosine = {report['min_cosine']:.6f} "
-                  f"(torch 経路と一致)")
-            print("  以後の起動は ONNX 経路(embed_backend=auto)で軽くなります")
+            print(f"  Parity: min cosine = {report['min_cosine']:.6f} "
+                  f"(matches the torch path)")
+            print("  Future startups will be faster via the ONNX path (embed_backend=auto)")
         return
 
-    # hook / surface はエンジン構築なし(高速経路)で動く
+    # hook / surface run without building the engine (fast path)
     if args.command == "hook":
         from .hooks import run_session_end, run_user_prompt
         if args.event == "session-end":
@@ -400,9 +401,9 @@ def main() -> None:
                   f"threshold={settings.surface_threshold}]")
             print()
             if not result["candidates"]:
-                print("  (候補なし)")
+                print("  (no candidates)")
             for c in result["candidates"]:
-                mark = "◎ 浮上" if c["id"] in result["surfaced"] else "  沈黙"
+                mark = "◎ surfaced" if c["id"] in result["surfaced"] else "   silent"
                 print(f"{mark}  {c['id']}  score={c['score']:.4f} "
                       f"(rel={c['relevance']:.4f} act={c['activation']:.4f} "
                       f"imp={c['importance']}) [{c['type']}/{c['room']}]")
@@ -410,7 +411,7 @@ def main() -> None:
                 print(f"        > {preview}")
         return
 
-    # エンジン構築
+    # Build the engine
     engine = _build_engine(fake_embedder=args.fake_embedder)
 
     if args.command == "remember":
@@ -490,11 +491,11 @@ def main() -> None:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             clusters = result.get("clusters", [])
-            print(f"統合候補クラスタ: {len(clusters)} 件")
+            print(f"Consolidation candidate clusters: {len(clusters)}")
             for i, cluster in enumerate(clusters, 1):
-                print(f"\nクラスタ {i} ({len(cluster['ids'])} 件):")
+                print(f"\nCluster {i} ({len(cluster['ids'])} items):")
                 for id_, content in zip(cluster["ids"], cluster.get("contents", [])):
-                    preview = content.replace("\n", " ")[:60] if content else "(内容なし)"
+                    preview = content.replace("\n", " ")[:60] if content else "(no content)"
                     print(f"  [{id_}] {preview}")
 
     elif args.command == "mark-consolidated":
@@ -508,11 +509,11 @@ def main() -> None:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             clusters = result.get("clusters", [])
-            print(f"スキル化候補クラスタ: {len(clusters)} 件")
+            print(f"Skill candidate clusters: {len(clusters)}")
             for i, cluster in enumerate(clusters, 1):
-                print(f"\nクラスタ {i} ({len(cluster['ids'])} 件):")
+                print(f"\nCluster {i} ({len(cluster['ids'])} items):")
                 for id_, content in zip(cluster["ids"], cluster.get("contents", [])):
-                    preview = content.replace("\n", " ")[:60] if content else "(内容なし)"
+                    preview = content.replace("\n", " ")[:60] if content else "(no content)"
                     print(f"  [{id_}] {preview}")
 
 

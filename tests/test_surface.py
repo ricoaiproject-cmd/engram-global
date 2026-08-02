@@ -1,4 +1,4 @@
-"""自発的想起(surface)のテスト。軽量経路なので埋め込みモデルは使わない。"""
+"""Tests for spontaneous recall (surface). A lightweight path, so no embedding model is used."""
 
 from __future__ import annotations
 
@@ -29,14 +29,14 @@ def _make_engine(settings) -> MemoryEngine:
 
 
 # ---------------------------------------------------------------------------
-# 字句関連度
+# Lexical relevance
 # ---------------------------------------------------------------------------
 
 def test_bigrams_basic():
     g = bigrams("予算 要求")
     assert "予算" in g
     assert "要求" in g
-    # 空白を跨ぐバイグラムは作らない
+    # Do not form bigrams across whitespace
     assert "算要" not in g
 
 
@@ -74,12 +74,12 @@ def test_run_surface_finds_related_memory(tmp_path):
     assert result["candidates"]
     top = result["candidates"][0]
     assert "予算要求" in top["content"]
-    # 関連が強いものは閾値を超えて浮上する
+    # A strongly related memory clears the threshold and surfaces
     assert top["id"] in result["surfaced"]
 
 
 def test_run_surface_excludes_episodes(tmp_path):
-    # episode は自発的想起の対象外(オウム返し・ノイズ防止)
+    # episodes are excluded from spontaneous recall (prevents parroting back / noise)
     settings = _make_settings(tmp_path, surface_threshold=0.3)
     engine = _make_engine(settings)
     engine.remember("予算要求の書式は財務課の様式7を使うこと", "knowledge", 7)
@@ -89,7 +89,7 @@ def test_run_surface_excludes_episodes(tmp_path):
     result = run_surface("予算要求の書式", settings=settings, session_id="s1")
     types = {c["type"] for c in result["candidates"]}
     assert "episode" not in types
-    assert result["candidates"]  # knowledge は出る
+    assert result["candidates"]  # knowledge memories do show up
 
 
 def test_run_surface_no_repeat_within_session(tmp_path):
@@ -101,11 +101,11 @@ def test_run_surface_no_repeat_within_session(tmp_path):
     r1 = run_surface("予算要求の書式について", settings=settings,
                      session_id="s1")
     assert r1["surfaced"]
-    # 同一セッションでは同じ記憶を二度浮上させない
+    # The same memory must not surface twice within the same session
     r2 = run_surface("予算要求の書式をもう一度", settings=settings,
                      session_id="s1")
     assert r1["surfaced"][0] not in r2["surfaced"]
-    # 別セッションでは再浮上できる
+    # A different session can surface it again
     r3 = run_surface("予算要求の書式について", settings=settings,
                      session_id="s2")
     assert r3["surfaced"]
@@ -118,12 +118,12 @@ def test_run_surface_respects_rooms(tmp_path):
                     room="personal")
     engine.db.close()
 
-    # work の部屋からは personal の記憶が候補にすら入らない
+    # From the "work" room, "personal" memories don't even make it into candidates
     result = run_surface("サムネイルの色はどうする?", settings=settings,
                          room="work", session_id="s1")
     assert all(c["room"] != "personal" for c in result["candidates"])
 
-    # personal の部屋では出る
+    # It does show up from the "personal" room
     result = run_surface("サムネイルの色はどうする?", settings=settings,
                          room="personal", session_id="s2")
     assert any(c["room"] == "personal" for c in result["candidates"])
@@ -163,16 +163,16 @@ def test_run_surface_threshold_filters(tmp_path):
     engine.db.close()
 
     result = run_surface("予算要求の書式", settings=settings, session_id="s1")
-    assert result["candidates"]          # 候補はある
-    assert result["surfaced"] == []      # が、閾値が高すぎて浮上しない
+    assert result["candidates"]          # candidates exist
+    assert result["surfaced"] == []      # but the threshold is too high to surface
 
 
 def test_run_surface_relevance_gate(tmp_path):
-    # 活性度・重要度が高くても、発話と無関係な記憶は浮上しない
+    # Even with high activation/importance, a memory unrelated to the utterance does not surface
     settings = _make_settings(tmp_path, surface_threshold=0.3)
     engine = _make_engine(settings)
     r = engine.remember("本番データベースは絶対に削除しない", "preference", 10)
-    engine.reinforce([r["id"]], strength=3.0)  # 活性度を盛る
+    engine.reinforce([r["id"]], strength=3.0)  # boost activation
     engine.db.close()
 
     result = run_surface("今日の天気はどうかな", settings=settings,

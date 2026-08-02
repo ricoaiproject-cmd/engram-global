@@ -1,4 +1,4 @@
-**English** | [日本語](README.ja.md)
+[日本語版 → engram-ja](https://github.com/ricoaiproject-cmd/engram-ja)
 
 # engram — Human-like memory for AI agents (MCP server)
 
@@ -6,10 +6,12 @@ Persistent memory shared by Claude Code, Codex, and Antigravity (Gemini CLI).
 The more a memory is used, the easier it is to recall; unused memories sink
 but never disappear — the same dynamics as human memory.
 
-> Note: the setup wizard and CLI messages are currently in Japanese, and the
-> default embedding model (Ruri-v3) is Japanese-focused. The engine itself is
-> language-agnostic; you can switch models with `embed_model` in
-> `~/.engram/config.toml` (re-run `engram reindex` after changing it).
+This is the **English edition**: all documentation, setup wizard, CLI
+messages, and agent-facing instructions are in English, and the default
+embedding model is `sentence-transformers/all-MiniLM-L6-v2` (English-focused,
+~90 MB). A fully Japanese edition with a Japanese-focused embedding model
+(Ruri-v3) lives at
+[engram-ja](https://github.com/ricoaiproject-cmd/engram-ja).
 
 ---
 
@@ -20,13 +22,13 @@ but never disappear — the same dynamics as human memory.
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram-en/main/install.ps1 | iex
 ```
 
 macOS / Linux:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram-en/main/install.sh | sh
 ```
 
 This single line installs uv, installs engram, and runs the setup wizard.
@@ -42,7 +44,7 @@ Windows (PowerShell):
 irm https://astral.sh/uv/install.ps1 | iex
 
 # 2. Install engram
-uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.git
+uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram-en.git
 
 # 3. Run the setup wizard
 engram setup
@@ -55,7 +57,7 @@ macOS / Linux:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 2. Install engram (force a uv-managed Python — see note below)
-UV_PYTHON_PREFERENCE=only-managed uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram.git
+UV_PYTHON_PREFERENCE=only-managed uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram-en.git
 
 # 3. Run the setup wizard
 engram setup
@@ -70,7 +72,7 @@ engram setup
 The setup wizard automatically:
 - creates the config file (`~/.engram/config.toml`)
 - initializes the memory folder
-- downloads the embedding model (first run only, ~500 MB)
+- downloads the embedding model (first run only, ~90 MB)
 - registers engram with Claude Code / Codex / Antigravity
 - registers the hooks for auto-encoding and proactive recall (Claude Code)
 
@@ -137,6 +139,27 @@ Valid names: `claude` / `codex` / `gemini` (`antigravity` is an alias for
 lets you pick by number (Enter selects all); `--non-interactive` registers all
 detected agents as before.
 
+### Choosing a different embedding model
+
+The engine is model-agnostic. Set `embed_model` (and, for prefix-style
+retrieval models, `query_prefix` / `doc_prefix`) in `~/.engram/config.toml`,
+then rebuild the index:
+
+```toml
+# Example: multilingual E5 (100+ languages, prefix-style)
+embed_model = "intfloat/multilingual-e5-small"
+query_prefix = "query: "
+doc_prefix = "passage: "
+```
+
+```powershell
+engram reindex       # re-embed all memories with the new model
+engram export-onnx   # optional: regenerate the ONNX fast path
+```
+
+Note: the built-in mean pooling matches models such as MiniLM, E5, and
+Ruri; CLS-pooling models (e.g. bge) are not supported by the ONNX path.
+
 ### Faster startup with ONNX (new in v0.6)
 
 Run this once:
@@ -153,9 +176,9 @@ anymore.
 
 Safety: the export verifies that the ONNX embeddings match the torch path on
 a set of sample texts (min cosine ≥ 0.999, including a long text that crosses
-ModernBERT's sliding-window boundary) and refuses to install a drifted model —
-a silently drifted embedding space would corrupt recall against your existing
-`index.db`.
+the sliding-window boundary of ModernBERT-based models) and refuses to
+install a drifted model — a silently drifted embedding space would corrupt
+recall against your existing `index.db`.
 
 `embed_backend` in `config.toml` (or `ENGRAM_EMBED_BACKEND`) selects the
 runtime: `auto` (default; ONNX if exported, else torch), `onnx` (forced;
@@ -276,27 +299,28 @@ activation = how easily it comes to mind.
 
 ### Search
 
-Vector neighbors (Ruri-v3 embeddings) + BM25 full-text search merged with
-RRF, then re-ranked by `0.6·relevance + 0.25·activation + 0.15·importance`.
+Vector neighbors (sentence-transformers embeddings) + BM25 full-text search
+merged with RRF, then re-ranked by
+`0.6·relevance + 0.25·activation + 0.15·importance`.
 
 #### Hybrid recall: exact tokens no longer sink
 
-Candidate relevance now blends the two search paths instead of collapsing FTS
+Candidate relevance blends the two search paths instead of collapsing FTS
 hits onto the vector similarity scale: vector hits keep their cosine
 similarity, and FTS hits get a lexical relevance `1 - exp(bm25)` derived
 directly from BM25 (0 for `bm25 >= 0`). When an id is hit by both, the higher
 of the two wins. Rare, decisive lexical matches — memory IDs, file paths,
-error codes, other exact tokens — now push `bm25` deep negative and surface
-`lex` near 1.0, clearing the compressed 0.8–0.87 band where Ruri-v3 cosine
-similarities tend to cluster. Previously, FTS-only hits were assigned the
-minimum vector similarity among the candidate pool, which buried exact-match
-results at the bottom of the ranking even when they were the obviously
-correct answer.
+error codes, other exact tokens — push `bm25` deep negative and surface
+`lex` near 1.0, clearing the narrow band into which dense-retriever cosine
+similarities tend to compress (with the Japanese model Ruri-v3, for example,
+0.8–0.87). Previously, FTS-only hits were assigned the minimum vector
+similarity among the candidate pool, which buried exact-match results at the
+bottom of the ranking even when they were the obviously correct answer.
 
-Short queries are now covered too (v0.7.1). The FTS5 trigram tokenizer cannot
-index terms shorter than 3 characters, so two-character Japanese words (like
-会議) used to be invisible to lexical search, and mixed queries containing any
-short token returned zero rows because of the implicit AND. The MATCH
+Short queries are covered too (v0.7.1). The FTS5 trigram tokenizer cannot
+index terms shorter than 3 characters, so 2-character terms (common in CJK
+text) used to be invisible to lexical search, and mixed queries containing
+any short token returned zero rows because of the implicit AND. The MATCH
 expression is now built from tokens of 3+ characters only, and when no such
 token exists the search falls back to LIKE substring matching with an
 IDF-based pseudo score (`lex = N/(N+df)`: rarer terms score higher).
@@ -452,11 +476,13 @@ tests/
 
 ### Codex says engram is enabled but the connection times out on startup
 
-engram loads a ~529MB embedding model (plus checks the memories folder) on
-every startup, which can take longer than Codex's default 30-second MCP
-startup timeout — especially right after a reboot, during antivirus scans, or
-when the memories folder lives on a cloud-synced drive (Google Drive, OneDrive,
-etc.). Your memories are fine; only the initial connection is timing out.
+On the torch fallback path, engram loads the embedding model (plus checks the
+memories folder) on every startup, which can take longer than Codex's default
+30-second MCP startup timeout — especially right after a reboot, during
+antivirus scans, or when the memories folder lives on a cloud-synced drive
+(Google Drive, OneDrive, etc.). Your memories are fine; only the initial
+connection is timing out. (Running `engram export-onnx` once largely
+eliminates this — startup drops to ~2 s.)
 
 Newer versions of `engram setup` write a longer startup timeout automatically.
 If you registered with an older version, either re-run
@@ -478,13 +504,13 @@ Then fully restart Codex (quit and relaunch, not just close the window).
 Re-run the same one-line installer to overwrite with the latest version:
 
 ```powershell
-irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram-en/main/install.ps1 | iex
 ```
 
 macOS / Linux:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram-en/main/install.sh | sh
 ```
 
 `uv tool upgrade engram` does the same.
@@ -511,7 +537,7 @@ uv tool uninstall engram
 
 # 6. To delete the data as well (memories, config, model cache)
 Remove-Item -Recurse -Force "$env:USERPROFILE\.engram"
-Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub\models--cl-nagoya--ruri*"
+Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub\models--sentence-transformers--all-MiniLM*"
 ```
 
 On macOS / Linux, steps 5–6 are:
@@ -519,5 +545,5 @@ On macOS / Linux, steps 5–6 are:
 ```bash
 uv tool uninstall engram
 rm -rf ~/.engram
-rm -rf ~/.cache/huggingface/hub/models--cl-nagoya--ruri*
+rm -rf ~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM*
 ```

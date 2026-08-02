@@ -1,4 +1,4 @@
-"""記憶力学コアの性質テスト。人間の記憶の振る舞いを満たすことを確認する。"""
+"""Property tests for the core memory dynamics. Verifies they match human memory behavior."""
 
 import math
 
@@ -12,7 +12,7 @@ def ev(days_ago: float, weight: float = 1.0) -> tuple[float, float]:
     return (NOW - days_ago * DAY, weight)
 
 
-# --- 減衰率(フラッシュバルブ記憶) ---
+# --- Decay rate (flashbulb memory) ---
 
 def test_decay_rate_importance_slows_decay():
     assert dyn.decay_rate(10) < dyn.decay_rate(5) < dyn.decay_rate(1)
@@ -26,7 +26,7 @@ def test_decay_rate_clamped():
     assert dyn.decay_rate(100) == 0.3
 
 
-# --- 初期符号化ブースト ---
+# --- Initial encoding boost ---
 
 def test_create_weight_scales_with_importance():
     assert dyn.create_event_weight(10) == 3.0
@@ -34,7 +34,7 @@ def test_create_weight_scales_with_importance():
     assert dyn.create_event_weight(1) < dyn.create_event_weight(10)
 
 
-# --- 活性度 ---
+# --- Activation ---
 
 def test_recent_beats_old():
     recent = dyn.activation_norm([ev(1)], NOW, 0.5)
@@ -49,14 +49,15 @@ def test_frequent_beats_rare():
 
 
 def test_old_memory_never_zero():
-    """放置された記憶も活性度は 0 にならない = 消えない。"""
+    """A neglected memory's activation never hits 0 - it never vanishes."""
     ancient = dyn.activation_norm([ev(365 * 5)], NOW, 0.5)
     assert ancient > 0.0
 
 
 def test_flashbulb_resists_forgetting():
-    """高 importance の未使用記憶は、低 importance の未使用記憶より
-    90日後でも大幅に想起しやすい(初期ブースト + 低減衰の複合効果)。"""
+    """An unused high-importance memory stays far more recallable than an
+    unused low-importance memory even after 90 days (combined effect of the
+    initial boost and slower decay)."""
     events_hi = [ev(90, dyn.create_event_weight(10))]
     events_lo = [ev(90, dyn.create_event_weight(2))]
     hi = dyn.activation_norm(events_hi, NOW, dyn.decay_rate(10))
@@ -65,7 +66,7 @@ def test_flashbulb_resists_forgetting():
 
 
 def test_min_elapsed_clamp():
-    """直後のアクセスで発散しない。未来時刻(時計ずれ)も安全。"""
+    """An access right after creation doesn't diverge. A future timestamp (clock skew) is also safe."""
     s_now = dyn.base_strength([(NOW, 1.0)], NOW, 0.5)
     s_future = dyn.base_strength([(NOW + 999, 1.0)], NOW, 0.5)
     assert s_now == s_future == 60.0 ** -0.5
@@ -76,11 +77,11 @@ def test_activation_empty_is_neg_inf_and_norm_zero():
     assert dyn.activation_norm([], NOW, 0.5) == 0.0
 
 
-# --- 最終スコア ---
+# --- Final score ---
 
 def test_relevance_dominates():
-    """関連度が低い高活性記憶は、関連度が高い低活性記憶に勝てない
-    (富者益富ループの防止)。"""
+    """A highly active but low-relevance memory can't beat a low-activation
+    but highly relevant memory (prevents the rich-get-richer loop)."""
     irrelevant_but_hot = dyn.final_score(0.2, 1.0, 10)
     relevant_but_cold = dyn.final_score(0.9, 0.0, 3)
     assert relevant_but_cold > irrelevant_but_hot
@@ -101,7 +102,7 @@ def test_rrf_single_list_preserves_order():
     assert scores["x"] > scores["y"]
 
 
-# --- 拡散活性化(deep recall) ---
+# --- Spreading activation (deep recall) ---
 
 def _graph(edges: dict[str, list[tuple[str, float]]]):
     return lambda node: edges.get(node, [])
@@ -133,10 +134,10 @@ def test_spread_weak_links_attenuate():
     assert out["strong"] > out["weak"] > 0.0
 
 
-# --- 関連度の候補内 min-max 正規化(コサイン圧縮対策) ---
+# --- Within-candidate-set min-max normalization of relevance (cosine-compression countermeasure) ---
 
 def test_normalize_stretches_compressed_band():
-    """Ruri 的な圧縮帯(0.8〜0.9)が 0..1 へ引き伸ばされること。"""
+    """A Ruri-like compressed band (0.8-0.9) should be stretched out to 0..1."""
     out = dyn.normalize_relevances({"a": 0.80, "b": 0.90, "c": 0.85}, floor=0.10)
     assert math.isclose(out["a"], 0.0)
     assert math.isclose(out["b"], 1.0)
@@ -144,10 +145,10 @@ def test_normalize_stretches_compressed_band():
 
 
 def test_normalize_floor_damps_tiny_spread():
-    """候補間の差が床未満のとき、微小差を全力増幅しないこと。"""
+    """When the spread across candidates is below the floor, tiny differences should not be amplified to full strength."""
     out = dyn.normalize_relevances({"a": 0.80, "b": 0.82}, floor=0.10)
     assert math.isclose(out["a"], 0.0)
-    assert math.isclose(out["b"], 0.2)  # 0.02/0.10。1.0 まで増幅しない
+    assert math.isclose(out["b"], 0.2)  # 0.02/0.10 - not amplified all the way to 1.0
 
 
 def test_normalize_preserves_order():
@@ -161,4 +162,4 @@ def test_normalize_preserves_order():
 def test_normalize_edge_cases():
     assert dyn.normalize_relevances({}) == {}
     single = dyn.normalize_relevances({"only": 0.85}, floor=0.10)
-    assert math.isclose(single["only"], 0.0)  # 1候補は相対差ゼロ扱い
+    assert math.isclose(single["only"], 0.0)  # a single candidate has zero relative difference by definition

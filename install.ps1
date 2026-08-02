@@ -1,9 +1,9 @@
-# engram インストールスクリプト
-# 使い方: irm <URL> | iex
-#         または: .\install.ps1
-#         または: .\install.ps1 -Source "C:\path\to\engram"
+# engram installer script
+# Usage: irm <URL> | iex
+#        or: .\install.ps1
+#        or: .\install.ps1 -Source "C:\path\to\engram"
 #
-# Windows PowerShell 5.1 互換
+# Compatible with Windows PowerShell 5.1
 
 param(
     [string]$Source = "git+https://github.com/ricoaiproject-cmd/engram.git"
@@ -13,14 +13,14 @@ $ErrorActionPreference = "Stop"
 
 Write-Host ""
 Write-Host "========================================"
-Write-Host " engram インストーラ"
+Write-Host " engram installer"
 Write-Host "========================================"
 Write-Host ""
 
 # ----------------------------------------------------------------
-# Step 1: uv の確認とインストール
+# Step 1: check for / install uv
 # ----------------------------------------------------------------
-Write-Host "[1/4] uv のインストール確認..."
+Write-Host "[1/4] Checking for uv..."
 
 $uvPath = $null
 try {
@@ -28,44 +28,44 @@ try {
 } catch {}
 
 if ($uvPath) {
-    Write-Host "  uv は既にインストール済みです: $uvPath"
+    Write-Host "  uv is already installed: $uvPath"
 } else {
-    Write-Host "  uv が見つかりません。インストールします..."
+    Write-Host "  uv not found. Installing..."
     try {
         Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
     } catch {
         Write-Host ""
-        Write-Host "[エラー] uv のインストールに失敗しました。"
-        Write-Host "  手動でインストールしてください: https://docs.astral.sh/uv/getting-started/installation/"
+        Write-Host "[ERROR] Failed to install uv."
+        Write-Host "  Please install it manually: https://docs.astral.sh/uv/getting-started/installation/"
         exit 1
     }
 
-    # 現セッションの PATH に uv を追加
+    # Make uv visible in this session's PATH
     $uvBin = Join-Path $env:USERPROFILE ".local\bin"
     if ($env:PATH -notlike "*$uvBin*") {
         $env:PATH = "$uvBin;$env:PATH"
     }
 
-    # 再確認
+    # Re-check
     try {
         $uvPath = (Get-Command uv -ErrorAction SilentlyContinue).Source
     } catch {}
 
     if (-not $uvPath) {
         Write-Host ""
-        Write-Host "[エラー] uv のインストール後もコマンドが見つかりません。"
-        Write-Host "  ターミナルを再起動してから再度お試しください。"
+        Write-Host "[ERROR] uv command still not found after installation."
+        Write-Host "  Restart your terminal and try again."
         exit 1
     }
-    Write-Host "  uv のインストール完了: $uvPath"
+    Write-Host "  uv installed: $uvPath"
 }
 
 Write-Host ""
 
 # ----------------------------------------------------------------
-# Step 2: git の確認とインストール(git+ ソースの取得に必要)
+# Step 2: check for / install git (needed to fetch git+ sources)
 # ----------------------------------------------------------------
-Write-Host "[2/4] git のインストール確認..."
+Write-Host "[2/4] Checking for git..."
 
 if ($Source -like "git+*") {
     $gitPath = $null
@@ -74,18 +74,18 @@ if ($Source -like "git+*") {
     } catch {}
 
     if ($gitPath) {
-        Write-Host "  git は既にインストール済みです: $gitPath"
+        Write-Host "  git is already installed: $gitPath"
     } else {
-        Write-Host "  git が見つかりません。インストールします..."
+        Write-Host "  git not found. Installing..."
         winget install --id Git.Git -e --silent --accept-source-agreements --accept-package-agreements
         if (-not $?) {
             Write-Host ""
-            Write-Host "[エラー] git のインストールに失敗しました。"
-            Write-Host "  手動でインストールしてください: https://git-scm.com/downloads/win"
+            Write-Host "[ERROR] Failed to install git."
+            Write-Host "  Please install it manually: https://git-scm.com/downloads/win"
             exit 1
         }
 
-        # 現セッションの PATH に git を追加
+        # Make git visible in this session's PATH
         $gitBin = "C:\Program Files\Git\cmd"
         if ((Test-Path $gitBin) -and ($env:PATH -notlike "*$gitBin*")) {
             $env:PATH = "$gitBin;$env:PATH"
@@ -97,24 +97,25 @@ if ($Source -like "git+*") {
 
         if (-not $gitPath) {
             Write-Host ""
-            Write-Host "[エラー] git のインストール後もコマンドが見つかりません。"
-            Write-Host "  ターミナルを再起動してから再度お試しください。"
+            Write-Host "[ERROR] git command still not found after installation."
+            Write-Host "  Restart your terminal and try again."
             exit 1
         }
-        Write-Host "  git のインストール完了: $gitPath"
+        Write-Host "  git installed: $gitPath"
     }
 } else {
-    Write-Host "  ローカルソースのため git は不要です(スキップ)"
+    Write-Host "  Local source — git not required (skipped)."
 }
 
 Write-Host ""
 
 # ----------------------------------------------------------------
-# Step 3: engram のインストール
+# Step 3: install engram
 # ----------------------------------------------------------------
-# 企業・学校のPCでは AppData(Roaming)がネットワークサーバー上にある
-# ことがあり、そこに置かれた Python はネットワーク越しに DLL を読み込めず
-# 動かない(実機で確認済み)。その場合は uv の置き場をローカルディスクへ移す。
+# On corporate/school PCs, AppData (Roaming) can live on a network server,
+# and Python placed there cannot load DLLs over the network — it simply
+# won't run (confirmed on real hardware). In that case, redirect uv's
+# storage location to the local disk.
 $appData = [Environment]::GetFolderPath("ApplicationData")
 $isNetworkAppData = $false
 if ($appData -like "\\*") {
@@ -129,59 +130,59 @@ if ($appData -like "\\*") {
 }
 
 if ($isNetworkAppData) {
-    Write-Host "  AppData がネットワーク上にあるPCを検出しました。"
-    Write-Host "  Python の置き場をローカルディスクに設定します(動作に必須)。"
+    Write-Host "  Detected a PC where AppData is on a network location."
+    Write-Host "  Redirecting Python's storage location to the local disk (required for it to work)."
     $localUv = Join-Path $env:LOCALAPPDATA "uv"
     $env:UV_TOOL_DIR = Join-Path $localUv "tools"
     $env:UV_PYTHON_INSTALL_DIR = Join-Path $localUv "python"
-    # 以後のセッション(uv tool upgrade 等)でも同じ場所を使うよう永続化
+    # Persist this so future sessions (e.g. uv tool upgrade) use the same location
     setx UV_TOOL_DIR $env:UV_TOOL_DIR | Out-Null
     setx UV_PYTHON_INSTALL_DIR $env:UV_PYTHON_INSTALL_DIR | Out-Null
     Write-Host ""
 }
 
-Write-Host "[3/4] engram をインストールします..."
-Write-Host "  ソース: $Source"
-Write-Host "  (初回は Python 3.12 のダウンロードが発生する場合があります)"
+Write-Host "[3/4] Installing engram..."
+Write-Host "  Source: $Source"
+Write-Host "  (The first run may download Python 3.12.)"
 Write-Host ""
 
 uv tool install --python 3.12 --force $Source
 
 if (-not $?) {
     Write-Host ""
-    Write-Host "[エラー] engram のインストールに失敗しました。"
-    Write-Host "  - Source の指定を確認してください: $Source"
-    Write-Host "  - ネットワーク接続を確認してください"
+    Write-Host "[ERROR] Failed to install engram."
+    Write-Host "  - Check the Source value: $Source"
+    Write-Host "  - Check your network connection"
     exit 1
 }
 
-# uv tool の shim PATH を追加
+# Add the uv tool shim directory to PATH
 $uvToolBin = Join-Path $env:USERPROFILE ".local\bin"
 if ($env:PATH -notlike "*$uvToolBin*") {
     $env:PATH = "$uvToolBin;$env:PATH"
 }
 
 Write-Host ""
-Write-Host "  engram のインストール完了"
+Write-Host "  engram installed."
 Write-Host ""
 
 # ----------------------------------------------------------------
-# Step 4: セットアップウィザードの実行
+# Step 4: run the setup wizard
 # ----------------------------------------------------------------
-Write-Host "[4/4] セットアップウィザードを実行します..."
+Write-Host "[4/4] Running the setup wizard..."
 Write-Host ""
 
 $engramExe = Join-Path $env:USERPROFILE ".local\bin\engram.exe"
 if (-not (Test-Path $engramExe)) {
-    # フォールバック: PATH から探す
+    # Fallback: look it up on PATH
     try {
         $engramExe = (Get-Command engram -ErrorAction SilentlyContinue).Source
     } catch {}
 }
 
 if (-not $engramExe) {
-    Write-Host "[エラー] engram コマンドが見つかりません。"
-    Write-Host "  ターミナルを再起動してから 'engram setup' を実行してください。"
+    Write-Host "[ERROR] engram command not found."
+    Write-Host "  Restart your terminal and run 'engram setup'."
     exit 1
 }
 
@@ -189,17 +190,17 @@ if (-not $engramExe) {
 
 if (-not $?) {
     Write-Host ""
-    Write-Host "[エラー] セットアップウィザードが失敗しました。"
-    Write-Host "  問題を修正した後、'engram setup' を再実行してください。"
+    Write-Host "[ERROR] The setup wizard failed."
+    Write-Host "  Fix the issue, then re-run 'engram setup'."
     exit 1
 }
 
 Write-Host ""
 Write-Host "========================================"
-Write-Host " インストール完了！"
+Write-Host " Installation complete!"
 Write-Host "========================================"
 Write-Host ""
-Write-Host "次のステップ:"
-Write-Host "  - エージェント(Claude Code 等)を再起動してください"
-Write-Host "  - 動作確認: engram doctor"
+Write-Host "Next steps:"
+Write-Host "  - Restart your agent (e.g. Claude Code)"
+Write-Host "  - Verify with: engram doctor"
 Write-Host ""

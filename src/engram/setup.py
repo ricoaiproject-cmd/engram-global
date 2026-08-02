@@ -1,9 +1,10 @@
-"""セットアップウィザード & doctor コマンドの実装。
+"""Implementation of the setup wizard & doctor command.
 
-設計方針:
-- 「判定・追記ロジック」を引数でパス注入できる純粋関数群に分離(テスト容易)
-- 副作用を持つ関数を小さく分離し、テストしやすい設計にする
-- すべての操作が冪等(何度実行しても安全)
+Design principles:
+- Separate "decision/append logic" into pure functions that accept paths as
+  arguments (easy to test)
+- Keep functions with side effects small and isolated for testability
+- All operations are idempotent (safe to run any number of times)
 """
 
 from __future__ import annotations
@@ -22,11 +23,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 # ---------------------------------------------------------------------------
-# config.toml の読み書き(tomllib は読み専用なので書き出しは自前生成)
+# Reading/writing config.toml (tomllib is read-only, so we hand-roll the writer)
 # ---------------------------------------------------------------------------
 
 def read_config_toml(config_file: Path) -> dict[str, Any]:
-    """config.toml を読み込んで dict を返す。ファイルが無い/壊れていたら空 dict。"""
+    """Read config.toml and return a dict. Returns an empty dict if the file is missing or broken."""
     if not config_file.is_file():
         return {}
     try:
@@ -38,7 +39,7 @@ def read_config_toml(config_file: Path) -> dict[str, Any]:
 
 
 def _toml_scalar(value: Any) -> str:
-    """スカラー値の TOML 表現。文字列はシングルクォート(エスケープ不要が利点)。"""
+    """TOML representation of a scalar value. Strings use single quotes (no escaping needed)."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
@@ -47,10 +48,11 @@ def _toml_scalar(value: Any) -> str:
 
 
 def write_config_toml(config_file: Path, data: dict[str, Any]) -> None:
-    """dict を config.toml に書き出す。
+    """Write a dict out to config.toml.
 
-    スカラー値はトップレベルに、dict 値は [セクション] として書き出す
-    (例: room_paths)。セクションのキーはパス等を含むためクォートする。
+    Scalar values are written at the top level; dict values are written as
+    [sections] (e.g. room_paths). Section keys are quoted since they may
+    contain paths, etc.
     """
     config_file.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
@@ -66,18 +68,18 @@ def write_config_toml(config_file: Path, data: dict[str, Any]) -> None:
 
 
 def merge_config_toml(config_file: Path, updates: dict[str, Any]) -> None:
-    """既存キーを保持しつつ updates で上書きして config.toml に書き戻す。"""
+    """Merge `updates` into the existing config (keeping other keys) and write config.toml back out."""
     existing = read_config_toml(config_file)
     existing.update(updates)
     write_config_toml(config_file, existing)
 
 
 # ---------------------------------------------------------------------------
-# テンプレート設置
+# Installing templates
 # ---------------------------------------------------------------------------
 
 def copy_templates(dest_dir: Path) -> None:
-    """パッケージ同梱のテンプレートを dest_dir にコピーする(常に上書き)。"""
+    """Copy the templates bundled with the package into dest_dir (always overwrites)."""
     import importlib.resources as ir
     dest_dir.mkdir(parents=True, exist_ok=True)
     for name in ("MEMORY_PROTOCOL.md", "ONBOARDING.md"):
@@ -86,15 +88,15 @@ def copy_templates(dest_dir: Path) -> None:
             content = ref.read_bytes()
             (dest_dir / name).write_bytes(content)
         except Exception as e:
-            print(f"  警告: テンプレート {name} のコピーに失敗しました: {e}")
+            print(f"  Warning: failed to copy template {name}: {e}")
 
 
 # ---------------------------------------------------------------------------
-# エージェント登録: Claude Code
+# Agent registration: Claude Code
 # ---------------------------------------------------------------------------
 
 def get_engram_mcp_path() -> Path | None:
-    """engram-mcp の実行可能ファイルのパスを返す。見つからなければ None。"""
+    """Return the path to the engram-mcp executable. Returns None if not found."""
     exe_dir = Path(sys.executable).parent
     for name in ("engram-mcp.exe", "engram-mcp"):
         candidate = exe_dir / name
@@ -107,17 +109,17 @@ def get_engram_mcp_path() -> Path | None:
 
 
 def _claude_cmd() -> str | None:
-    """claude CLI の実体パス。
+    """The actual path to the claude CLI.
 
-    npm 経由のインストールでは claude.cmd になっており、subprocess に
-    裸の "claude" を渡すと WinError 2 で失敗する(実機で発生した実例)。
-    必ず which の解決結果(拡張子付きフルパス)を使う。
+    npm-based installs end up as claude.cmd; passing bare "claude" to
+    subprocess fails with WinError 2 (observed in practice). Always use the
+    resolved path from `which` (full path, with extension).
     """
     return shutil.which("claude")
 
 
 def is_claude_mcp_registered() -> bool:
-    """claude mcp list に "engram" が含まれるか確認。"""
+    """Check whether "engram" appears in `claude mcp list`."""
     cmd = _claude_cmd()
     if cmd is None:
         return False
@@ -134,7 +136,7 @@ def is_claude_mcp_registered() -> bool:
 
 
 def _claude_registered_path(cmd: str) -> str | None:
-    """claude mcp list の出力から engram の登録先パスを取り出す(未登録なら None)。"""
+    """Extract engram's registered path from the `claude mcp list` output (None if not registered)."""
     try:
         result = subprocess.run(
             [cmd, "mcp", "list"],
@@ -149,16 +151,16 @@ def _claude_registered_path(cmd: str) -> str | None:
 
 
 def register_claude_mcp(engram_mcp_path: Path) -> tuple[bool, str]:
-    """Claude Code に engram MCP を登録する。成功すれば (True, メッセージ)。"""
+    """Register the engram MCP with Claude Code. Returns (True, message) on success."""
     cmd = _claude_cmd()
     if cmd is None:
-        return False, "claude コマンドが見つかりません(Claude Code 未インストール)"
+        return False, "claude command not found (Claude Code is not installed)"
 
     registered = _claude_registered_path(cmd)
     if registered is not None:
         if registered == str(engram_mcp_path):
-            return True, "既登録(スキップ)"
-        # パスが古い(再インストールで場所が変わった等)場合は登録し直す
+            return True, "already registered (skipped)"
+        # Re-register if the path is stale (e.g. location changed after a reinstall)
         try:
             subprocess.run(
                 [cmd, "mcp", "remove", "engram"],
@@ -176,15 +178,15 @@ def register_claude_mcp(engram_mcp_path: Path) -> tuple[bool, str]:
             encoding="utf-8", errors="replace",
         )
         if result.returncode == 0:
-            return True, "登録完了"
+            return True, "registration complete"
         else:
-            return False, f"登録失敗(exit {result.returncode}): {result.stderr.strip()}"
+            return False, f"registration failed (exit {result.returncode}): {result.stderr.strip()}"
     except Exception as e:
-        return False, f"登録失敗: {e}"
+        return False, f"registration failed: {e}"
 
 
 def get_engram_cli_path() -> Path | None:
-    """engram CLI 本体のパスを返す(フック登録に使う)。見つからなければ None。"""
+    """Return the path to the engram CLI itself (used for hook registration). None if not found."""
     exe_dir = Path(sys.executable).parent
     for name in ("engram.exe", "engram"):
         candidate = exe_dir / name
@@ -196,15 +198,15 @@ def get_engram_cli_path() -> Path | None:
     return None
 
 
-#: Claude Code に登録するフック: (イベント名, engram hook の引数, タイムアウト秒)
+#: Hooks registered with Claude Code: (event name, engram hook argument, timeout in seconds)
 _CLAUDE_HOOK_EVENTS: list[tuple[str, str, int]] = [
-    ("SessionEnd", "session-end", 180),      # モデルロード+要約があるため長め
-    ("UserPromptSubmit", "user-prompt", 15),  # 軽量経路。プロンプトを待たせない
+    ("SessionEnd", "session-end", 180),      # Longer timeout: involves model load + summarization
+    ("UserPromptSubmit", "user-prompt", 15),  # Lightweight path; don't make the prompt wait
 ]
 
 
 def _is_engram_hook_cmd(command: str) -> bool:
-    """既存のフックコマンドが engram のものか判定する(更新・冪等化用)。"""
+    """Determine whether an existing hook command belongs to engram (used for updates/idempotency)."""
     return "engram" in command and " hook " in f"{command} "
 
 
@@ -212,12 +214,12 @@ def register_claude_hooks(
     settings_path: Path,
     engram_cli: Path,
 ) -> tuple[bool, str]:
-    """~/.claude/settings.json に自動符号化・自発的想起のフックを登録する。冪等。
+    """Register the auto-encoding / spontaneous-recall hooks in ~/.claude/settings.json. Idempotent.
 
-    - 既に同じコマンドが登録済みならスキップ
-    - engram のフックだがパスが古い場合は更新
-    - engram 以外のフックには触れない
-    - 壊れた JSON は変更しない(破壊的変更をしない)
+    - Skips if the same command is already registered
+    - Updates the command if it's an engram hook but the path is stale
+    - Leaves non-engram hooks untouched
+    - Does not modify broken JSON (avoids destructive changes)
     """
     try:
         settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -229,7 +231,7 @@ def register_claude_hooks(
                 try:
                     data = json.loads(raw)
                 except Exception:
-                    return False, "既存の settings.json が解析できないため変更しません(手動で修復してください)"
+                    return False, "Existing settings.json could not be parsed, so no changes were made (please fix it manually)"
         else:
             data = {}
 
@@ -245,7 +247,7 @@ def register_claude_hooks(
                         found = True
                         if h.get("command") != command:
                             h["command"] = command
-                            changed.append(f"{event}(パス更新)")
+                            changed.append(f"{event} (path updated)")
                         h.setdefault("timeout", timeout)
             if not found:
                 entries.append({
@@ -258,41 +260,42 @@ def register_claude_hooks(
                 changed.append(event)
 
         if not changed:
-            return True, "既登録(スキップ)"
+            return True, "already registered (skipped)"
         settings_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        return True, f"登録完了({', '.join(changed)})"
+        return True, f"registration complete ({', '.join(changed)})"
     except Exception as e:
-        return False, f"登録失敗: {e}"
+        return False, f"registration failed: {e}"
 
 
 def update_claude_md(claude_md_path: Path, protocol_path: Path) -> tuple[bool, str]:
-    """~/.claude/CLAUDE.md に記憶プロトコルの @import を追記する。冪等。"""
+    """Append the memory protocol's @import to ~/.claude/CLAUDE.md. Idempotent."""
     try:
         claude_md_path.parent.mkdir(parents=True, exist_ok=True)
         existing = ""
         if claude_md_path.is_file():
             existing = claude_md_path.read_text(encoding="utf-8")
         if "engram" in existing:
-            return True, "既追記済み(スキップ)"
+            return True, "already appended (skipped)"
         abs_path = str(protocol_path.resolve()).replace("\\", "/")
-        addition = f"\n# 記憶プロトコル(engram)\n\n@{abs_path}\n"
+        addition = f"\n# Memory Protocol (engram)\n\n@{abs_path}\n"
         with claude_md_path.open("a", encoding="utf-8") as f:
             f.write(addition)
-        return True, "追記完了"
+        return True, "append complete"
     except Exception as e:
-        return False, f"追記失敗: {e}"
+        return False, f"append failed: {e}"
 
 
 # ---------------------------------------------------------------------------
-# エージェント登録: Codex
+# Agent registration: Codex
 # ---------------------------------------------------------------------------
 
-# Codex の MCP 初期接続タイムアウト既定値(30秒)では、engram の起動
-# (埋め込みモデル約529MBの読込+記憶フォルダ確認)が間に合わないことがある
-# (実機で接続失敗が発生)。登録時に起動待ち時間を明示して回避する
+# Codex's default MCP initial-connection timeout (30s) isn't always enough
+# for engram to start up (loading the ~90MB embedding model + checking the
+# memory folder) (connection failures observed in practice). We avoid this
+# by explicitly setting a longer startup timeout at registration time.
 _CODEX_STARTUP_TIMEOUT_SEC = "120.0"
 
 
@@ -300,10 +303,11 @@ def register_codex(
     codex_config_path: Path,
     engram_mcp_path: Path,
 ) -> tuple[bool, str]:
-    """~/.codex/config.toml に engram MCP ブロックを追記する。冪等。
+    """Append the engram MCP block to ~/.codex/config.toml. Idempotent.
 
-    登録済みブロックに startup_timeout_sec が無ければ追記する
-    (旧バージョンで登録したユーザーも setup 再実行だけで直る)。
+    If the registered block is missing startup_timeout_sec, it gets appended
+    (so users who registered with an older version can fix it just by
+    re-running setup).
     """
     try:
         import re
@@ -314,16 +318,17 @@ def register_codex(
             existing = codex_config_path.read_text(encoding="utf-8")
         mcp_path_str = str(engram_mcp_path).replace("\\", "/")
         if "[mcp_servers.engram]" in existing:
-            # 登録済みでもパスが古い(再インストールで場所が変わった等)場合は
-            # 更新する。壊れたパスのまま残すと接続不能になる(実機で発生)。
-            # Codex 本体が config.toml を書き直すと引用符が二重引用符に
-            # 変わることがあるため、両方の引用符を受け付ける
+            # Even if already registered, update it if the path is stale (e.g.
+            # location changed after a reinstall). Leaving a broken path in
+            # place makes the connection fail (observed in practice).
+            # When Codex itself rewrites config.toml, quotes can change to
+            # double quotes, so accept either quote style.
             pattern = (
                 r"(\[mcp_servers\.engram\]\s*\r?\ncommand = )(['\"])([^'\"\r\n]*)\2"
             )
             m = re.search(pattern, existing)
             if not m:
-                return True, "既追記済み(手動編集を検出したため変更せず)"
+                return True, "already appended (manual edit detected, left unchanged)"
             updated = existing
             actions = []
             if m.group(3) != mcp_path_str:
@@ -332,9 +337,9 @@ def register_codex(
                     lambda mm: f"{mm.group(1)}{mm.group(2)}{mcp_path_str}{mm.group(2)}",
                     updated,
                 )
-                actions.append("パスを更新")
-            # engram ブロック本体(次のセクション見出しまで)に起動待ち時間が
-            # 無ければ command 行の直後に追記する
+                actions.append("path updated")
+            # If the engram block itself (up to the next section heading) has
+            # no startup timeout, append it right after the command line
             block = re.search(
                 r"\[mcp_servers\.engram\]\r?\n(?:(?!\[).*\r?\n?)*", updated
             )
@@ -347,11 +352,11 @@ def register_codex(
                     ),
                     updated,
                 )
-                actions.append("起動待ち時間を追加")
+                actions.append("added startup timeout")
             if not actions:
-                return True, "既追記済み(スキップ)"
+                return True, "already appended (skipped)"
             codex_config_path.write_text(updated, encoding="utf-8")
-            return True, "・".join(actions)
+            return True, ", ".join(actions)
         addition = (
             f"\n[mcp_servers.engram]\n"
             f"command = '{mcp_path_str}'\n"
@@ -359,61 +364,63 @@ def register_codex(
         )
         with codex_config_path.open("a", encoding="utf-8") as f:
             f.write(addition)
-        return True, "追記完了"
+        return True, "append complete"
     except Exception as e:
-        return False, f"追記失敗: {e}"
+        return False, f"append failed: {e}"
 
 
 def update_agents_md(
     agents_md_path: Path,
     protocol_path: Path,
 ) -> tuple[bool, str]:
-    """~/.codex/AGENTS.md に記憶プロトコル全文を追記する。冪等。"""
+    """Append the full memory protocol text to ~/.codex/AGENTS.md. Idempotent."""
     try:
         agents_md_path.parent.mkdir(parents=True, exist_ok=True)
         existing = ""
         if agents_md_path.is_file():
             existing = agents_md_path.read_text(encoding="utf-8")
         if "engram" in existing:
-            return True, "既追記済み(スキップ)"
+            return True, "already appended (skipped)"
         protocol_text = ""
         if protocol_path.is_file():
             protocol_text = protocol_path.read_text(encoding="utf-8")
         abs_path = str(protocol_path.resolve()).replace("\\", "/")
         addition = (
             f"\n{protocol_text}\n"
-            f"> 正本: {abs_path}\n"
+            f"> Source of truth: {abs_path}\n"
         )
         with agents_md_path.open("a", encoding="utf-8") as f:
             f.write(addition)
-        return True, "追記完了"
+        return True, "append complete"
     except Exception as e:
-        return False, f"追記失敗: {e}"
+        return False, f"append failed: {e}"
 
 
 # ---------------------------------------------------------------------------
-# エージェント登録: Gemini / Antigravity
+# Agent registration: Gemini / Antigravity
 # ---------------------------------------------------------------------------
 
 def register_gemini_mcp(
     mcp_config_path: Path,
     engram_mcp_path: Path,
 ) -> tuple[bool, str]:
-    """~/.gemini/config/mcp_config.json に engram エントリを追加する。冪等。"""
+    """Add an engram entry to ~/.gemini/config/mcp_config.json. Idempotent."""
     try:
         mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
         if mcp_config_path.is_file():
             raw = mcp_config_path.read_text(encoding="utf-8")
             if raw.strip() == "":
-                # 空ファイルは「設定なし」として扱ってよい(実機で発生した実例)
+                # An empty file can be treated as "no config" (observed in practice)
                 data = {"mcpServers": {}}
             else:
                 try:
                     data = json.loads(raw)
                 except Exception:
-                    # 壊れた既存設定を空で上書きすると他サーバーの登録が消える。
-                    # 触らずに中断して手動修復を促す(破壊的変更をしない)
-                    return False, "既存の mcp_config.json が解析できないため変更しません(手動で修復してください)"
+                    # Overwriting a broken existing config with an empty one
+                    # would wipe out other servers' registrations. Stop
+                    # without touching it and ask for manual repair (avoid
+                    # destructive changes)
+                    return False, "Existing mcp_config.json could not be parsed, so no changes were made (please fix it manually)"
         else:
             data = {"mcpServers": {}}
 
@@ -424,63 +431,64 @@ def register_gemini_mcp(
         if "engram" in data["mcpServers"]:
             current = data["mcpServers"]["engram"].get("command", "")
             if current == mcp_path_str:
-                return True, "既登録(スキップ)"
-            # パスが古い場合は更新(壊れたパスのまま残さない)
+                return True, "already registered (skipped)"
+            # Update if the path is stale (don't leave a broken path in place)
             data["mcpServers"]["engram"]["command"] = mcp_path_str
             mcp_config_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            return True, "パスを更新"
+            return True, "path updated"
 
         data["mcpServers"]["engram"] = {"command": mcp_path_str}
         mcp_config_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        return True, "登録完了"
+        return True, "registration complete"
     except Exception as e:
-        return False, f"登録失敗: {e}"
+        return False, f"registration failed: {e}"
 
 
 def update_gemini_md(
     gemini_md_path: Path,
     protocol_path: Path,
 ) -> tuple[bool, str]:
-    """~/.gemini/GEMINI.md に記憶プロトコルの要約を追記する。冪等。"""
+    """Append a summary of the memory protocol to ~/.gemini/GEMINI.md. Idempotent."""
     try:
         gemini_md_path.parent.mkdir(parents=True, exist_ok=True)
         existing = ""
         if gemini_md_path.is_file():
             existing = gemini_md_path.read_text(encoding="utf-8")
         if "engram" in existing:
-            return True, "既追記済み(スキップ)"
+            return True, "already appended (skipped)"
         abs_path = str(protocol_path.resolve()).replace("\\", "/")
         addition = (
-            f"\n# 記憶プロトコル(engram)\n\n"
-            f"タスク開始時は必ず `recall` を呼び、タスク完了時に `reinforce` を呼ぶこと。"
-            f"重要な知見は `remember`、誤りは `forget` でなく `correct` を使うこと。"
-            f"詳細は {abs_path} を参照。\n"
+            f"\n# Memory Protocol (engram)\n\n"
+            f"Always call `recall` before starting a task, and `reinforce` "
+            f"when the task is done. Use `remember` for important findings, "
+            f"and `correct` (not `forget`) for mistakes. "
+            f"See {abs_path} for details.\n"
         )
         with gemini_md_path.open("a", encoding="utf-8") as f:
             f.write(addition)
-        return True, "追記完了"
+        return True, "append complete"
     except Exception as e:
-        return False, f"追記失敗: {e}"
+        return False, f"append failed: {e}"
 
 
 # ---------------------------------------------------------------------------
-# エージェント選択ユーティリティ
+# Agent selection utilities
 # ---------------------------------------------------------------------------
 
-#: 内部キー → 表示名
+#: internal key -> display name
 _AGENT_DISPLAY: dict[str, str] = {
     "claude": "Claude Code",
     "codex": "Codex",
     "gemini": "Antigravity (Gemini)",
 }
 
-#: 入力エイリアス → 内部キー (小文字正規化済み)
+#: input alias -> internal key (lowercase-normalized)
 _AGENT_ALIASES: dict[str, str] = {
     "claude": "claude",
     "codex": "codex",
@@ -492,10 +500,10 @@ _VALID_AGENT_KEYS = frozenset(_AGENT_DISPLAY.keys())
 
 
 def parse_agents(value: str) -> set[str]:
-    """カンマ区切りのエージェント名を内部キーの集合に変換する。
+    """Convert a comma-separated list of agent names into a set of internal keys.
 
-    エイリアス: "antigravity" -> "gemini"(大文字小文字無視)。
-    不正な名前が含まれる場合は ValueError(有効名の一覧をメッセージに含める)。
+    Alias: "antigravity" -> "gemini" (case-insensitive).
+    Raises ValueError if an invalid name is included (the message lists valid names).
     """
     valid_aliases = sorted(_AGENT_ALIASES.keys())
     result: set[str] = set()
@@ -505,8 +513,8 @@ def parse_agents(value: str) -> set[str]:
             continue
         if token not in _AGENT_ALIASES:
             raise ValueError(
-                f"不明なエージェント名: '{raw.strip()}'\n"
-                f"有効な名前: {', '.join(valid_aliases)}"
+                f"Unknown agent name: '{raw.strip()}'\n"
+                f"Valid names: {', '.join(valid_aliases)}"
             )
         result.add(_AGENT_ALIASES[token])
     return result
@@ -516,7 +524,7 @@ def _detect_agents(
     codex_dir: Path | None = None,
     gemini_dir: Path | None = None,
 ) -> list[str]:
-    """現在の環境で検出できるエージェントの内部キーリストを返す。"""
+    """Return the list of internal keys for agents detected in the current environment."""
     _codex_dir = codex_dir if codex_dir is not None else Path.home() / ".codex"
     _gemini_dir = gemini_dir if gemini_dir is not None else Path.home() / ".gemini"
     detected: list[str] = []
@@ -530,7 +538,7 @@ def _detect_agents(
 
 
 # ---------------------------------------------------------------------------
-# セットアップウィザード本体
+# Setup wizard main body
 # ---------------------------------------------------------------------------
 
 def setup_main(
@@ -538,17 +546,18 @@ def setup_main(
     non_interactive: bool = False,
     *,
     agents: set[str] | None = None,
-    # パス注入(テスト・カスタマイズ用)
+    # Path injection (for testing/customization)
     engram_home: Path | None = None,
     config_file: Path | None = None,
     claude_md_path: Path | None = None,
     codex_dir: Path | None = None,
     gemini_dir: Path | None = None,
 ) -> None:
-    """セットアップウィザードのメイン処理。冪等。
+    """Main routine for the setup wizard. Idempotent.
 
-    agents: 登録対象エージェントの内部キー集合("claude"/"codex"/"gemini")。
-            None = 従来どおり検出された全部。
+    agents: set of internal keys for the agents to register
+            ("claude"/"codex"/"gemini"). None = all detected agents,
+            as before.
     """
     from .config import config_path as _config_path
     from .config import _engram_home as _get_engram_home
@@ -564,35 +573,36 @@ def setup_main(
     results: list[tuple[str, bool, str]] = []
 
     print("=" * 60)
-    print("engram セットアップウィザード")
+    print("engram Setup Wizard")
     print("=" * 60)
     print()
 
     # ------------------------------------------------------------------
-    # Step 1: memories_dir を決定して config.toml に書き込む
+    # Step 1: Decide memories_dir and write it to config.toml
     # ------------------------------------------------------------------
-    print("[1/6] 設定ファイルの作成")
+    print("[1/6] Creating the config file")
 
     existing_cfg = read_config_toml(cfg_path)
 
     if memories_dir is not None:
         chosen_dir = Path(memories_dir)
-        print(f"  memories_dir: {chosen_dir} (引数で指定)")
+        print(f"  memories_dir: {chosen_dir} (specified via argument)")
     elif "memories_dir" in existing_cfg:
         chosen_dir = Path(existing_cfg["memories_dir"])
-        print(f"  既存の設定ファイルを尊重します: memories_dir={chosen_dir}")
-        print(f"  設定ファイル: {cfg_path}")
+        print(f"  Respecting the existing config file: memories_dir={chosen_dir}")
+        print(f"  Config file: {cfg_path}")
         print()
-        results.append(("設定ファイル", True, f"既存を尊重: {cfg_path}"))
+        results.append(("Config file", True, f"Using existing: {cfg_path}"))
     elif non_interactive:
         chosen_dir = home / "memories"
-        print(f"  memories_dir: {chosen_dir} (既定値)")
+        print(f"  memories_dir: {chosen_dir} (default)")
     else:
         default = home / "memories"
         print()
-        print("  記憶を保存するディレクトリを指定してください。")
-        print("  Google Drive や OneDrive の同期フォルダを指定すると記憶がバックアップ")
-        print("  されます。検索用DBは常にローカルに置かれるので安全です。")
+        print("  Please specify the directory where memories will be stored.")
+        print("  Pointing this at a Google Drive or OneDrive sync folder backs up")
+        print("  your memories automatically. The search DB always stays local,")
+        print("  so this is safe.")
         print()
         answer = input(f"  memories_dir [{default}]: ").strip()
         chosen_dir = Path(answer) if answer else default
@@ -600,100 +610,100 @@ def setup_main(
     if "memories_dir" not in existing_cfg or memories_dir is not None:
         chosen_dir = chosen_dir.expanduser().resolve()
         merge_config_toml(cfg_path, {"memories_dir": str(chosen_dir)})
-        print(f"  設定ファイルを作成しました: {cfg_path}")
+        print(f"  Config file created: {cfg_path}")
         print(f"  memories_dir: {chosen_dir}")
-        results.append(("設定ファイル作成", True, str(cfg_path)))
+        results.append(("Config file creation", True, str(cfg_path)))
 
-    # 自発的想起のモードを明示しておく(既定: shadow=ログのみで様子見)
+    # Explicitly set the spontaneous-recall mode (default: shadow = log-only, observe first)
     if "surface_mode" not in read_config_toml(cfg_path):
         merge_config_toml(cfg_path, {"surface_mode": "shadow"})
-        print("  surface_mode: shadow(自発的想起はまずログのみで観察)")
+        print("  surface_mode: shadow (spontaneous recall starts in log-only observation mode)")
 
     chosen_dir = Path(existing_cfg.get("memories_dir", chosen_dir)).expanduser().resolve() \
         if "memories_dir" in existing_cfg and memories_dir is None else chosen_dir.expanduser().resolve()
 
     # ------------------------------------------------------------------
-    # Step 2: 記憶フォルダの初期化
+    # Step 2: Initialize the memory folder
     # ------------------------------------------------------------------
     if "memories_dir" not in existing_cfg or memories_dir is not None:
         print()
-    print("[2/6] 記憶フォルダの初期化")
+    print("[2/6] Initializing the memory folder")
     try:
         MarkdownStore(chosen_dir)
-        print(f"  記憶フォルダを初期化しました: {chosen_dir}")
-        results.append(("記憶フォルダ初期化", True, str(chosen_dir)))
+        print(f"  Memory folder initialized: {chosen_dir}")
+        results.append(("Memory folder initialization", True, str(chosen_dir)))
     except Exception as e:
-        results.append(("記憶フォルダ初期化", False, str(e)))
-        print(f"  エラー: {e}")
+        results.append(("Memory folder initialization", False, str(e)))
+        print(f"  Error: {e}")
     print()
 
     # ------------------------------------------------------------------
-    # Step 3: テンプレート設置
+    # Step 3: Install templates
     # ------------------------------------------------------------------
-    print("[3/6] テンプレートのコピー")
+    print("[3/6] Copying templates")
     try:
         copy_templates(home)
         print(f"  MEMORY_PROTOCOL.md -> {home / 'MEMORY_PROTOCOL.md'}")
         print(f"  ONBOARDING.md      -> {home / 'ONBOARDING.md'}")
-        results.append(("テンプレート設置", True, "完了"))
+        results.append(("Template installation", True, "complete"))
     except Exception as e:
-        results.append(("テンプレート設置", False, str(e)))
-        print(f"  エラー: {e}")
+        results.append(("Template installation", False, str(e)))
+        print(f"  Error: {e}")
     print()
 
     # ------------------------------------------------------------------
-    # Step 4: 埋め込みモデルの取得
+    # Step 4: Fetch the embedding model
     # ------------------------------------------------------------------
-    print("[4/6] 埋め込みモデルの取得")
-    print("  初回は約500MBをダウンロードします(既にキャッシュがあればスキップ)...")
+    print("[4/6] Fetching the embedding model")
+    print("  Downloads roughly 90MB on first run (skipped if already cached)...")
     embedder = None
     try:
         from .embedder import RuriEmbedder
         embedder = RuriEmbedder()
-        _ = embedder.dim  # メインスレッドでロード(ワーカースレッドだと激遅になる既知問題)
-        results.append(("埋め込みモデル取得", True, "完了"))
-        print("  埋め込みモデルの準備が完了しました")
+        _ = embedder.dim  # Load on the main thread (known issue: much slower on a worker thread)
+        results.append(("Embedding model fetch", True, "complete"))
+        print("  Embedding model is ready")
     except Exception as e:
-        results.append(("埋め込みモデル取得", False, str(e)))
-        print(f"  警告: モデル取得に失敗しました({e})")
-        print("  サーバー初回起動時に再試行されます。")
+        results.append(("Embedding model fetch", False, str(e)))
+        print(f"  Warning: failed to fetch the model ({e})")
+        print("  This will be retried the first time the server starts.")
     print()
 
     # ------------------------------------------------------------------
-    # Step 5: エージェント登録
+    # Step 5: Register agents
     # ------------------------------------------------------------------
-    print("[5/6] エージェントへの登録")
+    print("[5/6] Registering with agents")
 
     engram_mcp = get_engram_mcp_path()
     if engram_mcp is None:
-        print("  警告: engram-mcp が見つかりません。インストールを確認してください。")
-        results.append(("engram-mcp の検索", False, "見つかりません"))
+        print("  Warning: engram-mcp not found. Please check your installation.")
+        results.append(("engram-mcp lookup", False, "not found"))
     else:
         print(f"  engram-mcp: {engram_mcp}")
 
-    # --- エージェント選択 ---
+    # --- Agent selection ---
     _codex_dir = codex_dir if codex_dir is not None else Path.home() / ".codex"
     _gemini_dir = gemini_dir if gemini_dir is not None else Path.home() / ".gemini"
 
-    # --agents で明示指定された場合は検出不問でそのまま使う
-    # 未指定 + 対話あり → 2件以上検出時に選択プロンプトを出す
-    # 未指定 + 非対話   → 検出された全部(従来どおり)
+    # If --agents is given explicitly, use it as-is regardless of detection
+    # Not given + interactive -> show a selection prompt when 2+ agents are detected
+    # Not given + non-interactive -> all detected agents (as before)
     if agents is not None:
-        # --agents で明示: 指定集合をそのまま使用
+        # Explicit via --agents: use the given set as-is
         selected_agents: set[str] = agents
         detected_agents: list[str] = _detect_agents(_codex_dir, _gemini_dir)
     else:
         detected_agents = _detect_agents(_codex_dir, _gemini_dir)
         if non_interactive or len(detected_agents) <= 1:
-            # 非対話 or 選択肢が1つ以下 → 全部
+            # Non-interactive, or 1 or fewer choices -> all
             selected_agents = set(detected_agents)
         else:
-            # 対話モード: 選択肢を提示
+            # Interactive mode: present choices
             print()
-            print("  検出されたエージェント:")
+            print("  Detected agents:")
             for idx, key in enumerate(detected_agents, 1):
                 print(f"    [{idx}] {_AGENT_DISPLAY[key]}")
-            print("  登録先を選んでください(Enter=すべて / 番号をカンマ区切り 例: 1,3):")
+            print("  Choose which to register (Enter=all / comma-separated numbers, e.g. 1,3):")
             try:
                 answer = input("  > ").strip()
             except EOFError:
@@ -706,14 +716,14 @@ def setup_main(
                 for part in answer.split(","):
                     part = part.strip()
                     if not part.isdigit():
-                        print(f"  無効な入力: '{part}' — すべてのエージェントを登録します")
+                        print(f"  Invalid input: '{part}' — registering all agents")
                         valid = False
                         break
                     n = int(part)
                     if 1 <= n <= len(detected_agents):
                         chosen.add(detected_agents[n - 1])
                     else:
-                        print(f"  番号が範囲外: {n} — すべてのエージェントを登録します")
+                        print(f"  Number out of range: {n} — registering all agents")
                         valid = False
                         break
                 selected_agents = chosen if valid else set(detected_agents)
@@ -724,55 +734,55 @@ def setup_main(
     if "claude" in selected_agents:
         if shutil.which("claude") is not None and engram_mcp is not None:
             ok, msg = register_claude_mcp(engram_mcp)
-            results.append(("Claude Code MCP 登録", ok, msg))
-            print(f"  Claude Code MCP 登録: {msg}")
+            results.append(("Claude Code MCP registration", ok, msg))
+            print(f"  Claude Code MCP registration: {msg}")
 
             ok2, msg2 = update_claude_md(_claude_md, home / "MEMORY_PROTOCOL.md")
-            results.append(("CLAUDE.md 更新", ok2, msg2))
-            print(f"  CLAUDE.md 更新: {msg2}")
+            results.append(("CLAUDE.md update", ok2, msg2))
+            print(f"  CLAUDE.md update: {msg2}")
 
-            # フック登録(自動符号化 + 自発的想起)
+            # Hook registration (auto-encoding + spontaneous recall)
             engram_cli = get_engram_cli_path()
             if engram_cli is not None:
                 ok3, msg3 = register_claude_hooks(
                     _claude_md.parent / "settings.json", engram_cli
                 )
-                results.append(("Claude Code フック登録", ok3, msg3))
-                print(f"  Claude Code フック登録: {msg3}")
-                print("    - セッション終了時の自動記憶(SessionEnd)")
-                print("    - 関連記憶の自発的想起(UserPromptSubmit、まずは影モード)")
+                results.append(("Claude Code hook registration", ok3, msg3))
+                print(f"  Claude Code hook registration: {msg3}")
+                print("    - Automatic memory on session end (SessionEnd)")
+                print("    - Spontaneous recall of related memories (UserPromptSubmit, shadow mode initially)")
             else:
-                results.append(("Claude Code フック登録", False, "engram CLI が見つかりません"))
-                print("  Claude Code フック登録: engram CLI が見つかりません")
+                results.append(("Claude Code hook registration", False, "engram CLI not found"))
+                print("  Claude Code hook registration: engram CLI not found")
         else:
-            # --agents で明示指定されたが未検出
-            print("  Claude Code: 未検出(インストールされていれば後で `engram setup` を再実行)")
+            # Explicitly specified via --agents but not detected
+            print("  Claude Code: not detected (if installed, re-run `engram setup` later)")
     else:
-        # selected_agents に含まれない理由を判定して表示
+        # Determine and show why it's not in selected_agents
         if "claude" in detected_agents:
-            # 検出されたが選択されなかった(対話/--agents で除外)
-            print(f"  {_AGENT_DISPLAY['claude']}: 選択外(スキップ)")
+            # Detected but not selected (excluded via interactive prompt / --agents)
+            print(f"  {_AGENT_DISPLAY['claude']}: not selected (skipped)")
         else:
-            # そもそも未検出(agents=None で従来どおり全部が対象だが存在しない)
-            print("  Claude Code: 未検出(インストールされていれば後で `engram setup` を再実行)")
+            # Not detected at all (agents=None targets all detected, but none exist)
+            print("  Claude Code: not detected (if installed, re-run `engram setup` later)")
 
     # --- Codex ---
     if "codex" in selected_agents:
         if _codex_dir.is_dir() and engram_mcp is not None:
             ok, msg = register_codex(_codex_dir / "config.toml", engram_mcp)
-            results.append(("Codex config.toml 更新", ok, msg))
-            print(f"  Codex config.toml 更新: {msg}")
+            results.append(("Codex config.toml update", ok, msg))
+            print(f"  Codex config.toml update: {msg}")
 
             ok2, msg2 = update_agents_md(_codex_dir / "AGENTS.md", home / "MEMORY_PROTOCOL.md")
-            results.append(("Codex AGENTS.md 更新", ok2, msg2))
-            print(f"  Codex AGENTS.md 更新: {msg2}")
+            results.append(("Codex AGENTS.md update", ok2, msg2))
+            print(f"  Codex AGENTS.md update: {msg2}")
         else:
-            print("  Codex: 未検出(インストールされていれば後で `engram setup` を再実行)")
+            print("  Codex: not detected (if installed, re-run `engram setup` later)")
     else:
         if "codex" in detected_agents:
-            print(f"  {_AGENT_DISPLAY['codex']}: 選択外(スキップ)")
+            print(f"  {_AGENT_DISPLAY['codex']}: not selected (skipped)")
         else:
-            print("  Codex: 未検出(インストールされていれば後で `engram setup` を再実行)")
+            print("  Codex: not detected (if installed, re-run `engram setup` later)")
 
     # --- Gemini / Antigravity ---
     if "gemini" in selected_agents:
@@ -781,54 +791,55 @@ def setup_main(
                 _gemini_dir / "config" / "mcp_config.json",
                 engram_mcp,
             )
-            results.append(("Gemini mcp_config.json 更新", ok, msg))
-            print(f"  Gemini mcp_config.json 更新: {msg}")
+            results.append(("Gemini mcp_config.json update", ok, msg))
+            print(f"  Gemini mcp_config.json update: {msg}")
 
             ok2, msg2 = update_gemini_md(_gemini_dir / "GEMINI.md", home / "MEMORY_PROTOCOL.md")
-            results.append(("Gemini GEMINI.md 更新", ok2, msg2))
-            print(f"  Gemini GEMINI.md 更新: {msg2}")
+            results.append(("Gemini GEMINI.md update", ok2, msg2))
+            print(f"  Gemini GEMINI.md update: {msg2}")
         else:
-            print("  Antigravity/Gemini: 未検出(インストールされていれば後で `engram setup` を再実行)")
+            print("  Antigravity/Gemini: not detected (if installed, re-run `engram setup` later)")
     else:
         if "gemini" in detected_agents:
-            print(f"  {_AGENT_DISPLAY['gemini']}: 選択外(スキップ)")
+            print(f"  {_AGENT_DISPLAY['gemini']}: not selected (skipped)")
         else:
-            print("  Antigravity/Gemini: 未検出(インストールされていれば後で `engram setup` を再実行)")
+            print("  Antigravity/Gemini: not detected (if installed, re-run `engram setup` later)")
 
     print()
 
     # ------------------------------------------------------------------
-    # Step 6: 動作確認 + stats
+    # Step 6: Health check + stats
     # ------------------------------------------------------------------
-    print("[6/6] 動作確認")
+    print("[6/6] Health check")
     if embedder is None:
-        results.append(("動作確認", False, "モデル未取得のためスキップ"))
-        print("  モデル未取得のためスキップ(サーバー初回起動時に再試行されます)")
+        results.append(("Health check", False, "skipped, model not fetched"))
+        print("  Skipped because the model wasn't fetched (will be retried on first server start)")
     else:
         try:
             from .config import get_settings
             from .engine import build_engine
             settings = get_settings()
-            # Step 4 でロード済みの本物の埋め込みを使い回す(テスト用の
-            # FakeEmbedder だと既存DBと次元が合わず開けない)
+            # Reuse the real embedder already loaded in Step 4 (a test
+            # FakeEmbedder would have a dimension mismatch with the existing
+            # DB and fail to open)
             engine = build_engine(settings, embedder=embedder)
-            engine.recall("セットアップ確認", mode="fast", limit=1,
+            engine.recall("setup check", mode="fast", limit=1,
                           record_hits=False)
             stats = engine.stats()
             engine.db.close()
             n = stats.get("total_memories", 0)
-            print(f"  動作確認 [OK]: 記憶 {n} 件")
-            results.append(("動作確認", True, f"記憶 {n} 件"))
+            print(f"  Health check [OK]: {n} memories")
+            results.append(("Health check", True, f"{n} memories"))
         except Exception as e:
-            results.append(("動作確認", False, str(e)))
-            print(f"  警告: {e}")
+            results.append(("Health check", False, str(e)))
+            print(f"  Warning: {e}")
     print()
 
     # ------------------------------------------------------------------
-    # 完了案内
+    # Completion guidance
     # ------------------------------------------------------------------
     print("=" * 60)
-    print("セットアップ結果")
+    print("Setup Results")
     print("=" * 60)
     max_step = max((len(s) for s, _, _ in results), default=20)
     for step, ok, msg in results:
@@ -837,29 +848,30 @@ def setup_main(
 
     onboarding_path = home / "ONBOARDING.md"
     print()
-    print("次のステップ:")
-    print("  1. エージェントを再起動(新しいセッションを開始)してください")
-    print(f"  2. 最初に ONBOARDING.md のインタビューを受けると効果的です")
-    print(f"     エージェントに「{onboarding_path} を読んでインタビューして」と依頼してください")
+    print("Next steps:")
+    print("  1. Restart your agent (start a new session)")
+    print(f"  2. It helps to go through the ONBOARDING.md interview first")
+    print(f"     Ask your agent: \"Read {onboarding_path} and interview me\"")
     print()
 
 
 # ---------------------------------------------------------------------------
-# doctor コマンド本体
+# doctor command main body
 # ---------------------------------------------------------------------------
 
 def check_embed_backend(settings) -> tuple[str, str]:
-    """埋め込み実行系の診断。(status, detail) を返す(doctor の行に載せる)。
+    """Diagnose the embedding runtime backend. Returns (status, detail) for a doctor row.
 
-    ONNX モデルが生成済みなら [OK] と dim・パリティを、未生成なら [--] と
-    export-onnx の案内を返す。embed_backend=torch の場合はその旨を返す。
+    Returns [OK] with the dim/parity if the ONNX model has been generated,
+    or [--] with instructions to run export-onnx if not. If
+    embed_backend=torch, reports that instead.
     """
     backend = getattr(settings, "embed_backend", "auto")
     onnx_dir = settings.onnx_model_dir
     meta_path = onnx_dir / "meta.json"
 
     if backend == "torch":
-        return "[--]", "torch を強制中(起動が重い。auto に戻すと ONNX を使う)"
+        return "[--]", "torch is forced (startup is heavy; switch back to auto to use ONNX)"
 
     if meta_path.is_file():
         try:
@@ -871,20 +883,21 @@ def check_embed_backend(settings) -> tuple[str, str]:
                 f"ONNX (dim={meta.get('dim')}{parity_str})  {onnx_dir}"
             )
         except Exception:
-            return "[NG]", f"meta.json が壊れています: {meta_path}"
+            return "[NG]", f"meta.json is corrupted: {meta_path}"
     return "[--]", (
-        "ONNX 未生成(torch フォールバックで起動が重い)。"
-        "`engram export-onnx` を実行してください"
+        "ONNX not generated (falls back to torch, which makes startup heavy). "
+        "Please run `engram export-onnx`"
     )
 
 
 def find_install_remnants(purelib: Path | None = None) -> list[str]:
-    """site-packages に残った pip 再インストール失敗の残骸を探す。
+    """Look for leftover remnants in site-packages from a failed pip reinstall.
 
-    pip は更新時にパッケージを「~ngram」等へ一時リネームする。その最中に
-    プロセスが落ちる(実例: 実行中の engram がファイルをロックしていた)と
-    残骸だけが残り、`import engram` が不能になる。対処: engram プロセスを
-    止める → 残骸を削除 → 再インストール。
+    During an update, pip temporarily renames the package to something like
+    "~ngram". If the process dies mid-rename (observed case: a running
+    engram process had the file locked), only the remnant is left behind and
+    `import engram` breaks. Fix: stop the engram process -> delete the
+    remnant -> reinstall.
     """
     if purelib is None:
         import sysconfig
@@ -895,12 +908,13 @@ def find_install_remnants(purelib: Path | None = None) -> list[str]:
 
 
 def check_fts5() -> tuple[str, str]:
-    """FTS5(trigram トークナイザ)の可否を診断する。(status, detail) を返す。
+    """Diagnose whether FTS5 (trigram tokenizer) is available. Returns (status, detail).
 
-    インメモリ DB で `tokenize='trigram'` の FTS5 仮想テーブルを実際に作って
-    確認する(SQLite>=3.34 が必要)。失敗時は db.py の keyword_search が
-    OperationalError を握りつぶしてベクトル検索のみに黙って縮退する旨を注記する
-    (無音の劣化なのでここで顕在化させる)。
+    Verifies by actually creating an FTS5 virtual table with
+    `tokenize='trigram'` in an in-memory DB (requires SQLite>=3.34). On
+    failure, notes that db.py's keyword_search will silently swallow the
+    OperationalError and degrade to vector-search-only (this is a silent
+    degradation, so we surface it here).
     """
     import sqlite3
 
@@ -917,25 +931,26 @@ def check_fts5() -> tuple[str, str]:
         return "[OK]", f"sqlite3 {sqlite_version}"
     except sqlite3.OperationalError:
         return "[NG]", (
-            f"sqlite3 {sqlite_version}(trigram 非対応)。"
-            "keyword_search が無音でベクトル検索のみに縮退します"
+            f"sqlite3 {sqlite_version} (trigram not supported). "
+            "keyword_search will silently degrade to vector-search-only"
         )
 
 
 def summarize_perf(perf_log_path: Path, max_lines: int = 500) -> tuple[str, str]:
-    """perf_log.jsonl の直近エントリから recall p50 / preload の要約を作る。
+    """Build a recall p50 / preload summary from the recent entries in perf_log.jsonl.
 
-    (status, detail) を返す。ファイルが無ければ [--] と未記録の案内。壊れた行
-    (JSON でない・キー欠落)はスキップする。
+    Returns (status, detail). If the file is missing, returns [--] with a
+    note that nothing has been recorded. Skips broken lines (not JSON, or
+    missing keys).
     """
     if not perf_log_path.is_file():
-        return "[--]", "未記録(初回のツール呼び出し後に生成)"
+        return "[--]", "not recorded yet (created after the first tool call)"
 
     try:
         with perf_log_path.open("r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
     except OSError:
-        return "[NG]", f"読み取りエラー: {perf_log_path}"
+        return "[NG]", f"read error: {perf_log_path}"
 
     tail = lines[-max_lines:]
     recall_ms: list[float] = []
@@ -959,7 +974,7 @@ def summarize_perf(perf_log_path: Path, max_lines: int = 500) -> tuple[str, str]
             last_preload_ms = ms
 
     if n_parsed == 0:
-        return "[--]", "有効な記録なし"
+        return "[--]", "no valid records"
 
     detail_parts = []
     if recall_ms:
@@ -974,9 +989,9 @@ def summarize_perf(perf_log_path: Path, max_lines: int = 500) -> tuple[str, str]
         detail_parts.append(f"preload {last_preload_ms:.0f}ms")
 
     if not detail_parts:
-        return "[--]", f"recall/preload の記録なし(直近{n_parsed}件)"
+        return "[--]", f"no recall/preload records (last {n_parsed} entries)"
 
-    detail = " / ".join(detail_parts) + f"(直近{n_parsed}件)"
+    detail = " / ".join(detail_parts) + f" (last {n_parsed} entries)"
     return "[OK]", detail
 
 
@@ -985,7 +1000,7 @@ def doctor_main(
     engram_home: Path | None = None,
     config_file: Path | None = None,
 ) -> None:
-    """環境診断を表形式で表示する(エンジン構築なし・モデルロードなし)。"""
+    """Display environment diagnostics as a table (no engine construction, no model load)."""
     import platform
     from .config import config_path as _config_path
     from .config import _engram_home as _get_engram_home
@@ -998,40 +1013,40 @@ def doctor_main(
     cfg_file = config_file if config_file is not None else _config_path()
 
     print("=" * 60)
-    print("engram doctor -- 環境診断")
+    print("engram doctor -- Environment Diagnostics")
     print("=" * 60)
     print()
 
-    W = 38  # ラベル列幅
+    W = 38  # label column width
 
     def row(label: str, status: str, detail: str = "") -> None:
         detail_str = f"  {detail}" if detail else ""
         print(f"  {label:<{W}} {status}{detail_str}")
 
-    # Python バージョン
+    # Python version
     py_ver = platform.python_version()
     major, minor, *_ = py_ver.split(".")
     py_ok = int(major) >= 3 and int(minor) >= 12
-    row("Python バージョン", "[OK]" if py_ok else "[NG]", py_ver)
+    row("Python version", "[OK]" if py_ok else "[NG]", py_ver)
 
-    # SQLite 拡張ロード対応(sqlite-vec に必須。macOS 標準 Python は非対応)
+    # SQLite extension-loading support (required for sqlite-vec; not supported by macOS's stock Python)
     import sqlite3 as _sqlite3
     _conn = _sqlite3.connect(":memory:")
     ext_ok = hasattr(_conn, "enable_load_extension")
     _conn.close()
-    row("SQLite 拡張ロード対応", "[OK]" if ext_ok else "[NG]",
-        "" if ext_ok else "uv 管理の Python で入れ直してください(README 参照)")
+    row("SQLite extension-loading support", "[OK]" if ext_ok else "[NG]",
+        "" if ext_ok else "Please reinstall with a uv-managed Python (see README)")
 
-    # FTS5(trigram)対応。非対応だと keyword_search が無音でベクトル検索のみに縮退する
+    # FTS5 (trigram) support. Without it, keyword_search silently degrades to vector-search-only
     fts5_status, fts5_detail = check_fts5()
-    row("FTS5(trigram)対応", fts5_status, fts5_detail)
+    row("FTS5 (trigram) support", fts5_status, fts5_detail)
 
-    # pip 再インストール失敗の残骸(~ngram 等)があると import 自体が壊れる
+    # Leftover remnants from a failed pip reinstall (e.g. ~ngram) break the import itself
     remnants = find_install_remnants()
-    row("インストール健全性", "[OK]" if not remnants else "[NG]",
+    row("Install health", "[OK]" if not remnants else "[NG]",
         "" if not remnants else (
-            f"site-packages に残骸: {', '.join(remnants)} "
-            "(engram プロセスを止めて残骸を削除し、再インストールしてください)"
+            f"Remnants found in site-packages: {', '.join(remnants)} "
+            "(stop the engram process, delete the remnants, and reinstall)"
         ))
     print()
 
@@ -1041,7 +1056,7 @@ def doctor_main(
     cfg_data: dict = {}
     if cfg_exists:
         cfg_data = read_config_toml(cfg_file)
-        cfg_parseable = bool(cfg_data) or cfg_file.stat().st_size < 10  # 空ファイルも許容
+        cfg_parseable = bool(cfg_data) or cfg_file.stat().st_size < 10  # also allow an empty file
         try:
             import tomllib
             with cfg_file.open("rb") as f:
@@ -1057,6 +1072,7 @@ def doctor_main(
         settings = get_settings()
         memories_dir = settings.memories_dir
     except Exception:
+        settings = None
         memories_dir = home / "memories"
 
     memories_accessible = memories_dir.is_dir()
@@ -1068,19 +1084,19 @@ def doctor_main(
                 f.relative_to(trash_dir)
             except ValueError:
                 md_count += 1
-    row("memories_dir アクセス", "[OK]" if memories_accessible else "[--]",
-        f"{memories_dir}  ({md_count} 件)" if memories_accessible else str(memories_dir))
+    row("memories_dir access", "[OK]" if memories_accessible else "[--]",
+        f"{memories_dir}  ({md_count} files)" if memories_accessible else str(memories_dir))
 
     # index.db
     db_path = home / "index.db"
     db_exists = db_path.is_file()
     db_size = db_path.stat().st_size if db_exists else 0
     row("index.db", "[OK]" if db_exists else "[--]",
-        f"{db_size:,} bytes" if db_exists else "未作成")
+        f"{db_size:,} bytes" if db_exists else "not created")
 
     print()
 
-    # 埋め込みモデルキャッシュ
+    # Embedding model cache
     hf_home = os.environ.get("HF_HOME") or os.environ.get("HUGGINGFACE_HUB_CACHE")
     if hf_home:
         hf_cache = Path(hf_home) / "hub"
@@ -1088,52 +1104,58 @@ def doctor_main(
         hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
     embed_cache = False
     if hf_cache.is_dir():
+        # Match the cache dir of the *configured* model (default: all-MiniLM-L6-v2)
+        embed_model = (
+            settings.embed_model if settings
+            else "sentence-transformers/all-MiniLM-L6-v2"
+        )
+        model_prefix = "models--" + embed_model.replace("/", "--")
         embed_cache = any(
-            d.name.startswith("models--cl-nagoya--")
+            d.name.startswith(model_prefix)
             for d in hf_cache.iterdir()
             if d.is_dir()
         )
-    row("埋め込みモデルキャッシュ", "[OK]" if embed_cache else "[--]",
-        "あり" if embed_cache else f"未ダウンロード ({hf_cache})")
+    row("Embedding model cache", "[OK]" if embed_cache else "[--]",
+        "present" if embed_cache else f"not downloaded ({hf_cache})")
 
-    # 埋め込み実行系(ONNX が既定。未生成なら torch フォールバックで重い)
+    # Embedding runtime backend (ONNX is default; falls back to torch, which is heavy, if not generated)
     try:
         _settings_for_backend = get_settings()
         backend_status, backend_detail = check_embed_backend(_settings_for_backend)
     except Exception as e:
-        backend_status, backend_detail = "[NG]", f"設定読み込み失敗: {e}"
-    row("埋め込み実行系", backend_status, backend_detail)
+        backend_status, backend_detail = "[NG]", f"failed to load settings: {e}"
+    row("Embedding runtime backend", backend_status, backend_detail)
 
     print()
 
     # engram-mcp
     mcp_path = get_engram_mcp_path()
     row("engram-mcp", "[OK]" if mcp_path else "[NG]",
-        str(mcp_path) if mcp_path else "見つかりません")
+        str(mcp_path) if mcp_path else "not found")
 
     print()
 
     # Claude Code
     claude_installed = shutil.which("claude") is not None
     if not claude_installed:
-        row("Claude Code CLI", "[--]", "未インストール")
-        row("Claude Code MCP 登録", "[--]", "Claude Code 未インストール")
+        row("Claude Code CLI", "[--]", "not installed")
+        row("Claude Code MCP registration", "[--]", "Claude Code not installed")
     else:
         row("Claude Code CLI", "[OK]", shutil.which("claude") or "")
         registered = is_claude_mcp_registered()
-        row("Claude Code MCP 登録", "[OK]" if registered else "[NG]",
-            "登録済み" if registered else "未登録(`engram setup` を実行してください)")
+        row("Claude Code MCP registration", "[OK]" if registered else "[NG]",
+            "registered" if registered else "not registered (please run `engram setup`)")
 
     # CLAUDE.md
     claude_md = Path.home() / ".claude" / "CLAUDE.md"
     if claude_md.is_file():
         has_engram = "engram" in claude_md.read_text(encoding="utf-8", errors="replace")
-        row("CLAUDE.md engram 組み込み", "[OK]" if has_engram else "[NG]",
-            str(claude_md) if has_engram else f"未追記: {claude_md}")
+        row("CLAUDE.md engram integration", "[OK]" if has_engram else "[NG]",
+            str(claude_md) if has_engram else f"not appended: {claude_md}")
     else:
-        row("CLAUDE.md engram 組み込み", "[--]", f"ファイルなし: {claude_md}")
+        row("CLAUDE.md engram integration", "[--]", f"file not found: {claude_md}")
 
-    # フック登録(自動符号化・自発的想起)
+    # Hook registration (auto-encoding / spontaneous recall)
     claude_settings = Path.home() / ".claude" / "settings.json"
     if claude_settings.is_file():
         try:
@@ -1151,16 +1173,16 @@ def doctor_main(
 
             se = _has_engram_hook("SessionEnd")
             up = _has_engram_hook("UserPromptSubmit")
-            row("自動符号化フック(SessionEnd)", "[OK]" if se else "[NG]",
-                "登録済み" if se else "未登録(`engram setup` を実行してください)")
-            row("自発的想起フック(UserPromptSubmit)", "[OK]" if up else "[NG]",
-                "登録済み" if up else "未登録(`engram setup` を実行してください)")
+            row("Auto-encoding hook (SessionEnd)", "[OK]" if se else "[NG]",
+                "registered" if se else "not registered (please run `engram setup`)")
+            row("Spontaneous recall hook (UserPromptSubmit)", "[OK]" if up else "[NG]",
+                "registered" if up else "not registered (please run `engram setup`)")
         except Exception:
-            row("フック登録", "[NG]", "settings.json 読み取りエラー")
+            row("Hook registration", "[NG]", "settings.json read error")
     else:
-        row("フック登録", "[--]", f"ファイルなし: {claude_settings}")
+        row("Hook registration", "[--]", f"file not found: {claude_settings}")
 
-    # 自発的想起の動作モードとログ
+    # Spontaneous recall mode and log
     try:
         _settings = get_settings()
         mode = _settings.surface_mode
@@ -1168,24 +1190,24 @@ def doctor_main(
         if surface_log.is_file():
             with surface_log.open("r", encoding="utf-8", errors="replace") as f:
                 n_log = sum(1 for _ in f)
-            detail = f"ログ {n_log} 件"
+            detail = f"{n_log} log entries"
         else:
-            detail = "ログなし"
-        row("surface_mode", "[OK]", f"{mode}({detail})")
+            detail = "no log"
+        row("surface_mode", "[OK]", f"{mode} ({detail})")
     except Exception:
-        row("surface_mode", "[NG]", "設定読み取りエラー")
+        row("surface_mode", "[NG]", "settings read error")
 
-    # perf ログ要約(recall p50 / preload 直近値)。ツール呼び出しの体感速度を診断する
+    # perf log summary (recent recall p50 / preload). Diagnoses perceived tool-call speed
     try:
         _settings_perf = get_settings()
         perf_log_path = _settings_perf.data_dir / "perf" / "perf_log.jsonl"
         if not _settings_perf.perf_log:
-            row("perf ログ", "[--]", "無効化されています(settings.perf_log=false)")
+            row("perf log", "[--]", "disabled (settings.perf_log=false)")
         else:
             perf_status, perf_detail = summarize_perf(perf_log_path)
-            row("perf ログ", perf_status, perf_detail)
+            row("perf log", perf_status, perf_detail)
     except Exception:
-        row("perf ログ", "[NG]", "設定読み取りエラー")
+        row("perf log", "[NG]", "settings read error")
 
     print()
 
@@ -1195,21 +1217,21 @@ def doctor_main(
         try:
             text = codex_cfg.read_text(encoding="utf-8")
             registered = "[mcp_servers.engram]" in text
-            row("Codex MCP 登録", "[OK]" if registered else "[NG]",
-                "登録済み" if registered else "未登録")
+            row("Codex MCP registration", "[OK]" if registered else "[NG]",
+                "registered" if registered else "not registered")
         except Exception:
-            row("Codex MCP 登録", "[NG]", "読み取りエラー")
+            row("Codex MCP registration", "[NG]", "read error")
     else:
-        row("Codex MCP 登録", "[--]", "Codex 未インストール")
+        row("Codex MCP registration", "[--]", "Codex not installed")
 
     # AGENTS.md
     agents_md = Path.home() / ".codex" / "AGENTS.md"
     if agents_md.is_file():
         has_engram = "engram" in agents_md.read_text(encoding="utf-8", errors="replace")
-        row("AGENTS.md engram 組み込み", "[OK]" if has_engram else "[NG]",
-            "組み込み済み" if has_engram else "未追記")
+        row("AGENTS.md engram integration", "[OK]" if has_engram else "[NG]",
+            "integrated" if has_engram else "not appended")
     else:
-        row("AGENTS.md engram 組み込み", "[--]", "ファイルなし")
+        row("AGENTS.md engram integration", "[--]", "file not found")
 
     print()
 
@@ -1220,20 +1242,20 @@ def doctor_main(
             data = json.loads(gemini_cfg.read_text(encoding="utf-8"))
             servers = data.get("mcpServers", {})
             registered = "engram" in servers
-            row("Antigravity MCP 登録", "[OK]" if registered else "[NG]",
-                "登録済み" if registered else "未登録")
+            row("Antigravity MCP registration", "[OK]" if registered else "[NG]",
+                "registered" if registered else "not registered")
         except Exception:
-            row("Antigravity MCP 登録", "[NG]", "JSON 読み取りエラー")
+            row("Antigravity MCP registration", "[NG]", "JSON read error")
     else:
-        row("Antigravity MCP 登録", "[--]", "Antigravity 未インストール")
+        row("Antigravity MCP registration", "[--]", "Antigravity not installed")
 
     # GEMINI.md
     gemini_md = Path.home() / ".gemini" / "GEMINI.md"
     if gemini_md.is_file():
         has_engram = "engram" in gemini_md.read_text(encoding="utf-8", errors="replace")
-        row("GEMINI.md engram 組み込み", "[OK]" if has_engram else "[NG]",
-            "組み込み済み" if has_engram else "未追記")
+        row("GEMINI.md engram integration", "[OK]" if has_engram else "[NG]",
+            "integrated" if has_engram else "not appended")
     else:
-        row("GEMINI.md engram 組み込み", "[--]", "ファイルなし")
+        row("GEMINI.md engram integration", "[--]", "file not found")
 
     print()

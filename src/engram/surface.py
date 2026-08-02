@@ -1,24 +1,28 @@
-"""自発的想起(②プロアクティブメモリ)の高速検索路。
+"""Fast-path search for proactive recall (2. proactive memory).
 
-エージェントに聞かれなくても、ユーザーの発話に関連する記憶を見つけて
-文脈に差し込む。UserPromptSubmit フックから毎プロンプト呼ばれるため、
-埋め込みモデル(torch)も numpy も sqlite-vec もロードしない:
+Surfaces memories relevant to what the user just said and injects them into
+context, without the agent having to ask. Called on every prompt from the
+UserPromptSubmit hook, so it does not load the embedding model (torch), numpy,
+or sqlite-vec:
 
-- 関連度: IDF 重み付き文字バイグラムの包含度(発話の語が記憶にどれだけ
-  含まれるか)。日本語は形態素解析なしでバイグラムが実用的に効く
-- 活性度: dynamics.activation_norm(ACT-R、math のみ)
-- 最終スコア: recall と同じ加重和(dynamics.final_score)
+- Relevance: IDF-weighted character-bigram containment (how much of the
+  utterance's vocabulary is contained in the memory). Bigrams work reasonably
+  well for Japanese even without morphological analysis.
+- Activation: dynamics.activation_norm (ACT-R, math only)
+- Final score: the same weighted sum used by recall (dynamics.final_score)
 
-DB へは読み取りのみ(recall_hit イベントも記録しない)。浮上した記憶が
-実際に役立ったかの判断と reinforce はエージェント側の責務。
+Read-only against the DB (does not even record recall_hit events). Deciding
+whether a surfaced memory was actually useful, and calling reinforce, is the
+agent's responsibility.
 
-モード(config.toml の surface_mode):
-- off:    何もしない
-- shadow: 差し込まず、「差し込むならこれを出していた」をログに残す(調整用)
-- active: 閾値を超えた記憶を実際に文脈へ差し込む
+Modes (surface_mode in config.toml):
+- off:    do nothing
+- shadow: don't inject anything, just log "this is what would have been
+          injected" (for tuning)
+- active: actually inject memories that clear the threshold into context
 
-shadow/active とも全候補をログ(surface/surface_log.jsonl)に記録するので、
-後から閾値の妥当性を検証できる。
+Both shadow and active log every candidate (surface/surface_log.jsonl), so the
+threshold's validity can be reviewed later.
 """
 
 from __future__ import annotations
@@ -40,14 +44,15 @@ _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
-# 字句関連度(IDF 重み付きバイグラム包含度)
+# Lexical relevance (IDF-weighted bigram containment)
 # ---------------------------------------------------------------------------
 
 def bigrams(text: str) -> set[str]:
-    """NFKC 正規化 + casefold した文字バイグラム集合。
+    """Return the set of character bigrams after NFKC normalization and
+    casefolding.
 
-    空白で区切った断片ごとに作る(単語境界を跨ぐバイグラムを作らない)。
-    1文字の断片はそのまま1グラムとして扱う。
+    Built per whitespace-separated segment (bigrams never cross a word
+    boundary). A single-character segment is treated as a 1-gram as-is.
     """
     norm = unicodedata.normalize("NFKC", text).casefold()
     grams: set[str] = set()
@@ -61,11 +66,12 @@ def bigrams(text: str) -> set[str]:
 
 
 def lexical_scores(prompt: str, docs: list[str]) -> list[float]:
-    """各文書について、発話バイグラムの IDF 重み付き包含度(0..1)を返す。
+    """For each document, return the IDF-weighted bigram containment (0..1)
+    against the prompt's bigrams.
 
-    score = Σ_{g ∈ P∩D} idf(g) / Σ_{g ∈ P} idf(g)
-    ありふれたバイグラム(です・ます等)は文書頻度が高く idf が小さいので、
-    内容語の一致が支配的になる。
+    score = sum_{g in P∩D} idf(g) / sum_{g in P} idf(g)
+    Common bigrams (function-word fragments etc.) appear in many documents and
+    so get a low idf, letting content-word matches dominate.
     """
     p_grams = bigrams(prompt)
     doc_grams = [bigrams(d) for d in docs]
@@ -75,7 +81,7 @@ def lexical_scores(prompt: str, docs: list[str]) -> list[float]:
 
     df: dict[str, int] = {}
     for grams in doc_grams:
-        for g in grams & p_grams:  # 発話に出るグラムだけ数えれば十分
+        for g in grams & p_grams:  # only grams that appear in the prompt need counting
             df[g] = df.get(g, 0) + 1
 
     idf = {g: math.log(1.0 + n / (1.0 + df.get(g, 0))) for g in p_grams}
@@ -91,14 +97,15 @@ def lexical_scores(prompt: str, docs: list[str]) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# DB 読み取り(軽量経路: sqlite3 標準モジュールのみ)
+# DB reads (lightweight path: stdlib sqlite3 only)
 # ---------------------------------------------------------------------------
 
 def _fetch_candidates(db_path: Path, rooms: list[str] | None) -> list[dict]:
-    """tier=hot の全記憶(本文付き)を返す。DB が無ければ空。
+    """Return every tier=hot memory (with body text). Empty if the DB doesn't
+    exist.
 
-    vec_memories(sqlite-vec)には触れないため拡張ロード不要。FTS5 は
-    SQLite 標準なので fts_memories の読み取りは問題ない。
+    Never touches vec_memories (sqlite-vec), so no extension loading is
+    needed. FTS5 is part of stock SQLite, so reading fts_memories is fine.
     """
     if not Path(db_path).is_file():
         return []
@@ -106,13 +113,18 @@ def _fetch_candidates(db_path: Path, rooms: list[str] | None) -> list[dict]:
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA busy_timeout=2000")
-        # episode は除外する。自発的想起は軽量な fast 相当であり、
-        # (1) episode は生の体験ログでノイズになりやすく、deep recall で
-        #     連想的に辿るのが本来の使い道(recall の fast も episode を除外)
-        # (2) 自動符号化(①)はユーザー発言を要約 episode に保存するため、
-        #     除外しないと「似た発言→自分の言葉を含む episode が完全一致で
-        #     浮上」という相互作用でオウム返し状態になる(実ログで確認)
-        # 知見・好み・プロジェクトに昇華された記憶だけを浮上させる
+        # Exclude episodes. Proactive recall is meant to be a lightweight
+        # equivalent of fast, and:
+        # (1) episodes are raw experience logs and tend to be noisy; following
+        #     them associatively is what deep recall is for (recall's fast
+        #     mode also excludes episodes)
+        # (2) since auto-encoding (1. automatic encoding) saves user
+        #     utterances as summarized episodes, not excluding them creates a
+        #     feedback loop where a similar utterance surfaces an episode
+        #     containing the user's own words as an exact match — i.e. an
+        #     echo effect (confirmed in real logs)
+        # Only surface memories that have been distilled into knowledge,
+        # preferences, or project memories
         sql = (
             "SELECT m.id, m.type, m.importance, m.room, m.created_at, "
             "       f.content AS content "
@@ -146,7 +158,7 @@ def _fetch_candidates(db_path: Path, rooms: list[str] | None) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# セッション状態とログ
+# Session state and logging
 # ---------------------------------------------------------------------------
 
 def _surface_dir(settings: Settings) -> Path:
@@ -175,7 +187,8 @@ def _save_surfaced_ids(settings: Settings, session_id: str,
         json.dumps({"surfaced": sorted(ids)}, ensure_ascii=False),
         encoding="utf-8",
     )
-    # ついでに古いセッション状態を掃除(数が小さいので毎回でも安い)
+    # While we're at it, clean up old session state (cheap even every time
+    # since the count is small)
     try:
         for f in d.glob("session-*.json"):
             if now - f.stat().st_mtime > _STATE_MAX_AGE_SECONDS:
@@ -193,13 +206,13 @@ def _append_log(settings: Settings, entry: dict) -> None:
             log.replace(log.with_suffix(".jsonl.old"))
     except OSError:
         pass
-    # 入力に不正なサロゲート等が紛れてもログ書き込みでは落とさない
+    # Don't let stray invalid surrogates etc. in the input crash the log write
     with log.open("a", encoding="utf-8", errors="replace") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 # ---------------------------------------------------------------------------
-# 本体
+# Main entry point
 # ---------------------------------------------------------------------------
 
 def run_surface(
@@ -212,13 +225,15 @@ def run_surface(
     now: float | None = None,
     dry_run: bool = False,
 ) -> dict:
-    """発話に関連する記憶を探し、モードに応じてログ・状態を更新する。
+    """Find memories relevant to the prompt, and update the log/state
+    according to the mode.
 
-    dry_run=True は手動確認(engram surface コマンド)用で、ログも状態も
-    書かず候補だけ返す。
-    返り値: {"mode", "room", "candidates": [...], "surfaced": [...]}
-    candidates は上位5件(スコア降順)、surfaced は閾値・重複抑制を通過して
-    実際に差し込む(または shadow で差し込んだことにする)記憶の id リスト。
+    dry_run=True is for manual inspection (the `engram surface` command) — it
+    writes neither log nor state, and just returns the candidates.
+    Returns: {"mode", "room", "candidates": [...], "surfaced": [...]}
+    candidates is the top 5 (sorted by descending score); surfaced is the list
+    of ids that cleared the threshold and duplicate-suppression and are
+    actually injected (or would be, under shadow mode).
     """
     ts = now if now is not None else time.time()
     mode = mode or settings.surface_mode
@@ -265,7 +280,7 @@ def run_surface(
         for score, rel, act, r in top
     ]
 
-    # 閾値 + 関連度ゲート + 同一セッション内の再浮上抑制
+    # Threshold + relevance gate + suppress re-surfacing within the same session
     already = set() if dry_run else _load_surfaced_ids(settings, session_id)
     surfaced: list[dict] = []
     for cand in result["candidates"]:
@@ -284,8 +299,9 @@ def run_surface(
     if dry_run:
         return result
 
-    # shadow でも active と同じ状態更新をする(影モードを本番の忠実な
-    # シミュレーションにするため)。ログは調整・監査の生データ
+    # Update state the same way in shadow mode as in active mode (so shadow
+    # mode is a faithful simulation of production). The log is raw data for
+    # tuning and auditing.
     if surfaced:
         _save_surfaced_ids(
             settings, session_id, already | set(result["surfaced"]), ts
@@ -306,10 +322,11 @@ def run_surface(
 
 
 def format_context(surfaced_items: list[dict]) -> str:
-    """active モードで文脈に差し込むテキストを組み立てる。"""
+    """Build the text injected into context in active mode."""
     lines = [
-        "(engram 自発的想起)以下はあなたの記憶基盤から自動的に浮上した、"
-        "今の発言に関連する可能性のある記憶です。",
+        "(engram proactive recall) The following memories were automatically "
+        "surfaced from your memory store as possibly relevant to what you "
+        "just said.",
         "",
     ]
     for c in surfaced_items:
@@ -319,7 +336,8 @@ def format_context(surfaced_items: list[dict]) -> str:
         lines.append(f"- [{c['id']}] ({c['type']}/{c['room']}) {content}")
     lines += [
         "",
-        "実際に役立った場合のみ engram の reinforce にこの id を渡して定着させて"
-        "ください。内容が誤っていれば correct を、無関係なら無視してください。",
+        "Only if this actually turns out to be useful, pass its id to "
+        "engram's reinforce to reinforce it. If the content is wrong, use "
+        "correct; if it's irrelevant, ignore it.",
     ]
     return "\n".join(lines)

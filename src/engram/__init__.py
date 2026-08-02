@@ -1,10 +1,10 @@
-"""engram — 人間型記憶基盤 MCP サーバー。
+"""engram - a human-like memory MCP server.
 
-意味(埋め込み)と思い出しやすさ(活性度)を分離した記憶モデル:
-- 埋め込みベクトルは固定。検索順位は ACT-R 活性度で変調する
-- 使うほど活性化し、放置するとべき乗則で減衰する(ただし消えない)
-- 印象的な文脈(高 importance)の記憶は深く符号化され、減衰が遅い
-- 訂正された誤りは「間違えた経験ごと」高活性で刻み直す
+A memory model that separates meaning (embedding) from recallability (activation):
+- The embedding vector is fixed; search ranking is modulated by ACT-R activation
+- Activation rises with use and decays by a power law when neglected (but never vanishes)
+- Memories from a striking context (high importance) are encoded more deeply and decay more slowly
+- A corrected error is re-encoded at high activation, mistake and all, as its own experience
 """
 
 __version__ = "0.9.0"

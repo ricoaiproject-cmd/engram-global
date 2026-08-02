@@ -1,4 +1,4 @@
-"""MarkdownStore のテスト。"""
+"""Tests for MarkdownStore."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def test_content_hash_different():
 
 
 # ---------------------------------------------------------------------------
-# create: サブディレクトリ振り分け
+# create: subdirectory routing
 # ---------------------------------------------------------------------------
 
 def test_create_knowledge_subdir(store):
@@ -97,7 +97,7 @@ def test_create_episode_different_month(store):
 
 
 # ---------------------------------------------------------------------------
-# frontmatter 往復(links の [[id]] 変換含む)
+# frontmatter round-trip (including [[id]] conversion for links)
 # ---------------------------------------------------------------------------
 
 def test_frontmatter_roundtrip_basic(store):
@@ -153,7 +153,7 @@ def test_links_empty_roundtrip(store):
 
 
 # ---------------------------------------------------------------------------
-# ファイル名規約と日本語 slug
+# Filename convention and Japanese slug
 # ---------------------------------------------------------------------------
 
 def test_filename_format(store):
@@ -225,7 +225,7 @@ def test_filename_spaces_to_dashes(store):
 
 
 # ---------------------------------------------------------------------------
-# update / content_hash 変化
+# update / content_hash change
 # ---------------------------------------------------------------------------
 
 def test_update_changes_content_hash(store):
@@ -262,7 +262,7 @@ def test_update_same_content_same_hash(store):
 
 
 # ---------------------------------------------------------------------------
-# add_link: 重複無視
+# add_link: ignores duplicates
 # ---------------------------------------------------------------------------
 
 def test_add_link_no_duplicate(store):
@@ -333,7 +333,7 @@ def test_move_to_trash(store):
 
 
 # ---------------------------------------------------------------------------
-# scan_all: _trash を除外
+# scan_all: excludes _trash
 # ---------------------------------------------------------------------------
 
 def test_scan_all_excludes_trash(store):
@@ -370,7 +370,7 @@ def test_scan_all_empty_store(store):
 
 
 # ---------------------------------------------------------------------------
-# 壊れた frontmatter をスキップして落ちない
+# Skip broken frontmatter without crashing
 # ---------------------------------------------------------------------------
 
 def test_scan_all_skips_broken_frontmatter(store):
@@ -428,7 +428,7 @@ def test_find_by_id_not_found(store):
 
 
 # ---------------------------------------------------------------------------
-# content_hash 関数
+# content_hash function
 # ---------------------------------------------------------------------------
 
 def test_content_hash_whitespace_normalized():

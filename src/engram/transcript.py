@@ -1,9 +1,12 @@
-"""Claude Code の transcript(JSONL)からセッション要約を作る(①自動符号化)。
+"""Build a session summary from a Claude Code transcript (JSONL) (1. automatic
+encoding).
 
-LLM を使わない決定的要約: セッションの背骨はユーザー発言なので、
-「最初の依頼 + 途中の主な発言 + 最後の応答の要旨」を機械的に組み立てる。
-粗い記録だが「セッションが終われば勝手にエピソード記憶になる」ことが価値。
-精密な知見はエージェントがその場で remember する(役割分担)。
+A deterministic, LLM-free summary: since a session's backbone is what the user
+said, mechanically assemble "the first request + the main messages along the
+way + the gist of the final response." It's a coarse record, but its value is
+that "a session automatically becomes an episode memory once it ends."
+Precise insights are remembered by the agent on the spot instead (division of
+labor).
 """
 
 from __future__ import annotations
@@ -11,16 +14,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-# Claude Code がユーザー発言として transcript に混ぜ込む非発話テキストの先頭部
+# Prefixes of non-utterance text that Claude Code mixes into the transcript
+# under the user role
 _NOISE_PREFIXES = (
-    "<",            # <command-name> / <system-reminder> / <local-command-stdout> 等
-    "Caveat:",      # ローカルコマンド実行時の注意書き
+    "<",            # <command-name> / <system-reminder> / <local-command-stdout> etc.
+    "Caveat:",      # notice shown when a local command is run
     "[Request interrupted",
 )
 
 
 def _texts_from_content(content) -> list[str]:
-    """message.content(str または ブロックの list)からテキストを取り出す。"""
+    """Extract text from message.content (a str, or a list of blocks)."""
     if isinstance(content, str):
         return [content]
     texts: list[str] = []
@@ -41,15 +45,15 @@ def _is_noise(text: str) -> bool:
 
 
 def extract_messages(transcript_path: str | Path) -> dict:
-    """transcript JSONL を走査して要約の材料を返す。
+    """Scan the transcript JSONL and return the raw material for the summary.
 
-    返り値: {
-        "user_texts": [ユーザーの実発言(時系列)],
-        "last_assistant": 最後のアシスタント発言(無ければ ""),
-        "summary": Claude Code が付けたセッション表題(無ければ ""),
-        "cwd": transcript に記録された作業ディレクトリ(無ければ ""),
+    Returns: {
+        "user_texts": [the user's actual messages, in chronological order],
+        "last_assistant": the last assistant message (empty string if none),
+        "summary": the session title Claude Code assigned (empty string if none),
+        "cwd": the working directory recorded in the transcript (empty string if none),
     }
-    壊れた行・未知の形式は黙ってスキップする(フックを落とさない)。
+    Malformed lines and unknown formats are silently skipped (never crash the hook).
     """
     user_texts: list[str] = []
     last_assistant = ""
@@ -103,7 +107,7 @@ def extract_messages(transcript_path: str | Path) -> dict:
 
 
 def _clip(text: str, limit: int) -> str:
-    """1行に潰して limit 文字に丸める。"""
+    """Flatten to a single line and truncate to `limit` characters."""
     flat = " ".join(text.split())
     if len(flat) <= limit:
         return flat
@@ -118,9 +122,10 @@ def build_episode(
     min_chars: int = 24,
     max_user_items: int = 6,
 ) -> str | None:
-    """extract_messages の結果から episode 本文を組み立てる。
+    """Assemble the episode body from the result of extract_messages.
 
-    記録に値しないセッション(実発言なし・極端に短い)は None を返す。
+    Returns None for sessions not worth recording (no actual user messages,
+    or extremely short).
     """
     user_texts: list[str] = messages.get("user_texts", [])
     if not user_texts:
@@ -129,13 +134,14 @@ def build_episode(
         return None
 
     title = messages.get("summary") or _clip(user_texts[0], 60)
-    where = f"、{project}" if project else ""
+    where = f", {project}" if project else ""
 
-    lines: list[str] = [f"セッション体験({date_str}{where}): {_clip(title, 80)}", ""]
-    lines.append("ユーザーの依頼・発言:")
+    lines: list[str] = [f"Session ({date_str}{where}): {_clip(title, 80)}", ""]
+    lines.append("User's requests / messages:")
     lines.append(f"1. {_clip(user_texts[0], 200)}")
 
-    # 2件目以降: 件数が多ければ前半と後半から拾う(中盤の相づちより情報が濃い)
+    # From the 2nd message on: if there are many, pull from the start and the
+    # end (more informative than the back-and-forth in the middle)
     rest = user_texts[1:]
     if len(rest) > max_user_items - 1:
         head_n = (max_user_items - 1) // 2
@@ -148,11 +154,11 @@ def build_episode(
     for i, t in enumerate(picked, start=2):
         lines.append(f"{i}. {_clip(t, 110)}")
     if omitted > 0:
-        lines.append(f"(ほか {omitted} 件の発言)")
+        lines.append(f"(and {omitted} more messages)")
 
     last_assistant = messages.get("last_assistant", "")
     if last_assistant:
         lines.append("")
-        lines.append(f"結末(最後の応答の要旨): {_clip(last_assistant, 280)}")
+        lines.append(f"Outcome (summary of the last response): {_clip(last_assistant, 280)}")
 
     return "\n".join(lines)

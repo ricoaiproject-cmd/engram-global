@@ -1,19 +1,21 @@
-"""MCP サーバー(担当: Agent B)。
+"""MCP server (owner: Agent B).
 
-mcp 公式 SDK の FastMCP(stdio)で engine の操作をツールとして公開する。
+Exposes engine operations as tools via the official mcp SDK's FastMCP (stdio).
 
     from mcp.server.fastmcp import FastMCP
 
-実装要件:
-- エンジンは初回ツール呼び出し時に遅延構築(build_engine)。起動を速く保つ。
-- 各ツールは engine の同名メソッドへ委譲し、dict をそのまま返す。
-- docstring がそのままツール説明になるので、エージェントが「いつ呼ぶべきか」を
-  判断できる文面にする(日本語でよい)。
-- ツール: remember / recall / reinforce / correct / link / forget /
+Implementation requirements:
+- The engine is lazily constructed on the first tool call (build_engine), to keep
+  startup fast.
+- Each tool delegates to the engine method of the same name and returns the dict
+  as-is.
+- The docstring becomes the tool's description verbatim, so word it so an agent
+  can judge "when should I call this."
+- Tools: remember / recall / reinforce / correct / link / forget /
          consolidation_candidates / mark_consolidated / skill_candidates /
          reindex / stats
-- 引数は engine のシグネチャに合わせる(now は公開しない)。
-- main() でstdio実行: mcp.run()。
+- Arguments follow the engine's method signatures (`now` is not exposed).
+- main() runs over stdio: mcp.run().
 """
 
 from __future__ import annotations
@@ -30,17 +32,17 @@ from .engine import MemoryEngine, build_engine
 
 mcp = FastMCP("engram")
 
-# モジュールレベル遅延シングルトン(初回ツール呼び出しで構築)
+# Module-level lazy singleton (constructed on the first tool call)
 _engine: MemoryEngine | None = None
 _engine_lock = threading.Lock()
 
-# サーバーの既定の部屋。プロセス起動時の作業ディレクトリ(=エージェントを
-# 起動したプロジェクト)から config の room_paths で決まる
+# The server's default room. Determined at process startup from the working
+# directory (= the project the agent was launched from) via config's room_paths
 _room: str | None = None
 
 
 def _get_engine() -> MemoryEngine:
-    """エンジンを遅延構築して返す(スレッド安全)。"""
+    """Lazily construct and return the engine (thread-safe)."""
     global _engine
     if _engine is not None:
         return _engine
@@ -52,21 +54,25 @@ def _get_engine() -> MemoryEngine:
 
 
 def _timed(name: str):
-    """perf.timed への薄い委譲(settings は _get_engine 経由で取得しキャッシュ)。
+    """Thin delegate to perf.timed (settings is fetched via _get_engine and cached).
 
-    FastMCP はツール関数のシグネチャを検査してスキーマを作るため、ツール関数
-    自体をデコレータで包むのではなく、各ツールの本体内で `with _timed(...):`
-    のように使う(関数のシグネチャ・docstring には一切触れない)。
+    FastMCP inspects a tool function's signature to build its schema, so rather
+    than wrapping the tool function itself in a decorator, use
+    `with _timed(...):` inside each tool's body (this never touches the
+    function's signature or docstring).
     """
     return perf.timed(_get_engine().settings, "tool", name)
 
 
 def _run_startup_index_check(engine: MemoryEngine) -> None:
-    """起動時に Markdown と index の乖離を検知し、auto なら reindex / warn なら警告。
+    """Detect drift between the Markdown files and the index at startup;
+    reindex if mode is auto, warn if mode is warn.
 
-    記憶 Markdown は共有(例: Google Drive)でも index.db はマシンごとローカルなため、
-    他マシンが書いた記憶が index に取り込まれず recall に出ない盲点が生じる。これを
-    起動時に解消する。失敗してもエンジン提供は止めない(記憶基盤の可用性を最優先)。
+    Memory Markdown files can be shared (e.g. via Google Drive) while index.db
+    is local to each machine, which creates a blind spot: memories written by
+    another machine aren't picked up into the index and don't show up in
+    recall. This resolves that at startup. Failure here never blocks serving
+    the engine (availability of the memory substrate is the top priority).
     """
     import sys
 
@@ -92,7 +98,8 @@ def _run_startup_index_check(engine: MemoryEngine) -> None:
 
 
 def _default_room() -> str:
-    """サーバー起動ディレクトリから記憶の部屋を解決する(初回のみ計算)。"""
+    """Resolve the memory room from the server's startup directory (computed
+    once, on first use)."""
     global _room
     if _room is None:
         try:
@@ -113,13 +120,16 @@ def remember(
     related_ids: list[str] | None = None,
     room: str | None = None,
 ) -> dict:
-    """新しい記憶を保存する。
+    """Save a new memory.
 
-    タスク中に重要な情報(事実・好み・プロジェクト状況・出来事)を発見したとき呼ぶ。
-    importance は 1〜10 で文脈の重要度を自己採点する。
-    既存の類似記憶(cos が dup_threshold=0.95 以上)がある場合は重複強化して返す。
-    room は通常指定不要(作業ディレクトリから自動判定)。どの文脈でも使う
-    普遍的な記憶だけ room="common" を明示する。
+    Call this whenever you discover something important during a task (a fact,
+    a preference, project status, an event). Self-score `importance` from 1-10
+    based on how significant it is in context.
+    If a sufficiently similar existing memory is found (cosine similarity >=
+    dup_threshold=0.95), it is reinforced as a duplicate and returned instead.
+    You normally don't need to pass `room` (it's inferred automatically from
+    the working directory). Only pass room="common" explicitly for universal
+    memories that apply across every context.
     """
     engine = _get_engine()
     with _timed("remember"):
@@ -143,15 +153,21 @@ def recall(
     record_hits: bool = True,
     room: str | None = None,
 ) -> dict:
-    """記憶を検索して返す。
+    """Search for and return memories.
 
-    タスク開始時に必ず呼ぶ。関連する過去の知識・好み・プロジェクト状況を想起できる。
-    mode="fast" は tier=hot のみ高速検索。スコアが低いと自動で deep に切り替わる。
-    mode="deep" は cold/superseded/episode も含め連想リンクを辿って広く探す。
-    mode="exhaustive" は活性度を無視し関連度のみで全記憶を総当たりする。
-    「確かに記録したはずなのに fast/deep で出ない」沈んだ記憶を掘り起こす最終手段。
-    room は通常指定不要(現在の部屋+共通だけを検索する)。room="*" で全部屋を
-    横断検索できるが、仕事/個人の分離を壊さないよう必要時のみ使うこと。
+    Always call this at the start of a task. It surfaces relevant past
+    knowledge, preferences, and project context.
+    mode="fast" searches only tier=hot, quickly. If the score is low it
+    automatically falls back to deep.
+    mode="deep" searches more broadly, including cold/superseded/episode
+    memories, and follows associative links.
+    mode="exhaustive" ignores activation and ranks purely by relevance across
+    every memory. Use this as a last resort to dig up a "sunk" memory you're
+    sure you recorded but that isn't surfacing under fast/deep.
+    You normally don't need to pass `room` (it searches only the current room
+    plus common). room="*" searches across all rooms — use it only when
+    necessary, since it breaks the separation between work and personal
+    contexts.
     """
     engine = _get_engine()
     with _timed("recall"):
@@ -170,12 +186,14 @@ def reinforce(
     ids: list[str],
     strength: float = 1.0,
 ) -> dict:
-    """実際に役立った記憶の使用を報告する。
+    """Report which memories actually turned out to be useful.
 
-    タスク完了時、実際に役立った記憶の id を報告する。
-    強化された記憶は次回の recall で上位に浮上しやすくなる。
-    同時に複数 id を渡すと、それらの記憶が共起リンクで結ばれる(ヘッブ則)。
-    strength は 0.1〜3.0 で強化の強さを指定できる。
+    When a task finishes, report the ids of memories that actually helped.
+    Reinforced memories are more likely to surface near the top on the next
+    recall.
+    Passing multiple ids at once links those memories together via a
+    co-occurrence link (Hebbian learning).
+    strength ranges 0.1-3.0 and controls how strong the reinforcement is.
     """
     engine = _get_engine()
     with _timed("reinforce"):
@@ -189,10 +207,12 @@ def correct(
     reason: str,
     source: str = "unknown",
 ) -> dict:
-    """記憶が誤っていたとき forget ではなくこれを使う。
+    """Use this instead of forget when a memory turns out to be wrong.
 
-    旧記憶を superseded(訂正済み)に降格し、訂正の経緯を記録した新記憶を作成する。
-    誤りを明示的に記録することで、同じ間違いの繰り返しを防ぐ(ハイパーコレクション効果)。
+    Demotes the old memory to superseded (corrected) and creates a new memory
+    that records the reason for the correction. Explicitly recording the
+    mistake prevents the same error from being repeated (a hypercorrection
+    effect).
     """
     engine = _get_engine()
     with _timed("correct"):
@@ -206,10 +226,10 @@ def correct(
 
 @mcp.tool()
 def link(src: str, dst: str) -> dict:
-    """2つの記憶に explicit リンクを張る。
+    """Create an explicit link between two memories.
 
-    関連する記憶を手動で結びたいときに呼ぶ。
-    deep recall でリンクを辿って連想的に想起できるようになる。
+    Call this when you want to manually connect related memories.
+    Deep recall can then follow this link to surface memories associatively.
     """
     engine = _get_engine()
     with _timed("link"):
@@ -218,11 +238,14 @@ def link(src: str, dst: str) -> dict:
 
 @mcp.tool()
 def forget(id: str) -> dict:
-    """記憶をソフト削除する(ゴミ箱へ移動)。
+    """Soft-delete a memory (move it to trash).
 
-    不要になった記憶を検索対象から外したいときに呼ぶ。
-    物理削除ではなくゴミ箱移動なので、誤削除の場合は復元できる。
-    誤りを訂正したい場合は forget ではなく correct を使うこと。
+    Call this when a memory is no longer needed and you want it excluded from
+    search.
+    This moves the memory to trash rather than physically deleting it, so it
+    can be restored if deleted by mistake.
+    If you want to correct an error rather than remove a memory, use correct
+    instead of forget.
     """
     engine = _get_engine()
     with _timed("forget"):
@@ -231,11 +254,14 @@ def forget(id: str) -> dict:
 
 @mcp.tool()
 def consolidation_candidates() -> dict:
-    """統合候補の episode クラスタを返す。
+    """Return clusters of episode memories that are candidates for
+    consolidation.
 
-    就寝前(セッション終了時)に呼び、類似する古い episode をまとめて
-    知識・プロジェクト記憶として圧縮する候補を提示する。
-    LLM が要約を生成し、mark_consolidated で統合を完了する。
+    Call this before ending a session (at session end), to surface clusters of
+    similar older episodes that are candidates for compressing into knowledge
+    or project memories.
+    The LLM generates the summary, then calls mark_consolidated to complete the
+    consolidation.
     """
     engine = _get_engine()
     with _timed("consolidation_candidates"):
@@ -244,13 +270,14 @@ def consolidation_candidates() -> dict:
 
 @mcp.tool()
 def mark_consolidated(episode_ids: list[str], new_memory_id: str) -> dict:
-    """統合完了を記録する。
+    """Record that a consolidation has been completed.
 
-    consolidation_candidates で提示されたクラスタを LLM が要約し、
-    remember で新記憶を作成した後にこれを呼ぶ。
-    元の episode は cold(長期保存)に降格し、derived_from リンクで繋がれる。
-    スキル化候補(skill_candidates)を整理したときも、対象 episode を
-    このツールで cold に降格して使う。
+    Call this after the LLM has summarized a cluster surfaced by
+    consolidation_candidates and created the new memory via remember.
+    The original episodes are demoted to cold (long-term storage) and linked
+    to the new memory via a derived_from link.
+    Also use this tool to demote the target episodes to cold after acting on a
+    skill_candidates cluster.
     """
     engine = _get_engine()
     with _timed("mark_consolidated"):
@@ -258,9 +285,10 @@ def mark_consolidated(episode_ids: list[str], new_memory_id: str) -> dict:
             episode_ids=episode_ids,
             new_memory_id=new_memory_id,
         )
-    # 統合完了でクラスタ数が変わるので促し用の状態を即時更新する。
-    # 怠ると次の session-end まで古いクラスタ数のまま促し続ける
-    # (consolidation・スキル化候補の両方を更新する)
+    # Consolidation changes the cluster count, so refresh the nudge state
+    # immediately. Skipping this would keep nudging with the stale cluster
+    # count until the next session-end (updates both the consolidation and
+    # skill-candidate nudge state).
     try:
         import time
 
@@ -283,17 +311,21 @@ def mark_consolidated(episode_ids: list[str], new_memory_id: str) -> dict:
 
 @mcp.tool()
 def skill_candidates() -> dict:
-    """スキル化候補の episode クラスタを返す。
+    """Return clusters of episode memories that are candidates for
+    extraction into a reusable skill.
 
-    同じ形の作業(手順)を記録した episode が3件以上(既定値。三度ルール)
-    似たクラスタを成しているとき、その手順を再利用可能なスキル(手順書。
-    Claude Code なら SKILL.md 等)として切り出す価値があるかを判断する
-    材料として使う。consolidation_candidates と違い年齢フィルタはない
-    (直近の繰り返し作業こそ対象)。
-    クラスタが見つかっても、スキル化するかどうかは必ずユーザーに提案して
-    承認を得ること。勝手に作成・配備しない。
-    採用・見送りが決まったら remember(type=knowledge)で経緯を記録し、
-    mark_consolidated(episode_ids, new_memory_id) で元 episode を整理する。
+    When 3 or more (default; the "three-times rule") episodes recording the
+    same shape of work (procedure) form a similar cluster, use this as input
+    for judging whether that procedure is worth extracting into a reusable
+    skill (a how-to document — a SKILL.md for Claude Code, etc.). Unlike
+    consolidation_candidates, there is no age filter here (recently repeated
+    work is exactly the target).
+    Even when a cluster is found, always propose turning it into a skill to
+    the user and get their approval first. Never create or deploy a skill on
+    your own.
+    Once the decision (adopt or pass) is made, record the reasoning via
+    remember(type=knowledge), then clean up the original episodes with
+    mark_consolidated(episode_ids, new_memory_id).
     """
     engine = _get_engine()
     with _timed("skill_candidates"):
@@ -302,10 +334,12 @@ def skill_candidates() -> dict:
 
 @mcp.tool()
 def reindex() -> dict:
-    """Markdown ファイルから DB インデックスを再構築する。
+    """Rebuild the DB index from the Markdown files.
 
-    手動でファイルを編集した後や、DB が壊れた疑いがあるときに呼ぶ。
-    差異のある記憶だけ再埋め込みするため、全件再構築より高速。
+    Call this after manually editing files, or when you suspect the DB is
+    corrupted.
+    Only memories that differ are re-embedded, so this is faster than a full
+    rebuild.
     """
     engine = _get_engine()
     with _timed("reindex"):
@@ -314,9 +348,10 @@ def reindex() -> dict:
 
 @mcp.tool()
 def stats() -> dict:
-    """記憶の統計情報を返す。
+    """Return memory statistics.
 
-    記憶の件数(type別・tier別)、アクセスイベント数、リンク数などを確認できる。
+    Shows memory counts (by type and tier), the number of access events, the
+    number of links, and so on.
     """
     engine = _get_engine()
     with _timed("stats"):
@@ -324,12 +359,14 @@ def stats() -> dict:
 
 
 def _preload() -> None:
-    """埋め込みモデルを先読みする(失敗しても起動は続行)。preload 全体の所要時間を計測する。"""
+    """Preload the embedding model (startup continues even on failure). Times
+    the whole preload duration."""
     import sys
     import time
 
-    # settings は build_engine 前でも config だけから取れるので、エンジン構築
-    # 自体が失敗しても計測できるようにここで先に用意する
+    # settings can be obtained from config alone, even before the engine is
+    # built, so fetch it here first so timing works even if engine
+    # construction itself fails
     from .config import get_settings
 
     settings = get_settings()
@@ -337,9 +374,9 @@ def _preload() -> None:
     ok = True
     try:
         engine = _get_engine()
-        engine.embedder.embed_query("ウォームアップ")
+        engine.embedder.embed_query("warm-up")
         print("engram: engine preloaded", file=sys.stderr)
-    except Exception as e:  # 失敗しても起動は続け、初回ツール呼び出しで再試行
+    except Exception as e:  # keep starting up even on failure; retry lazily on the first tool call
         ok = False
         print(f"engram: preload failed, will retry lazily: {e}", file=sys.stderr)
     finally:
@@ -352,11 +389,13 @@ def _preload() -> None:
 
 
 def _resolve_preload_mode(raw: str | None, onnx_ready: bool) -> str:
-    """ENGRAM_PRELOAD の値を実際の先読み方式に解決する(純粋関数・テスト対象)。
+    """Resolve the ENGRAM_PRELOAD value into the actual preload strategy
+    (pure function, covered by tests).
 
-    blocking / background / off の明示値はそのまま。auto(既定)および未知の値は、
-    ONNX モデルが生成済みなら background、torch フォールバック環境なら blocking。
-    根拠は main() 冒頭のコメントを参照。
+    Explicit values of blocking / background / off pass through unchanged.
+    auto (the default) and unknown values resolve to background if the ONNX
+    model has already been generated, or blocking in a torch-fallback
+    environment. See the comment at the top of main() for the rationale.
     """
     mode = (raw or "auto").strip().lower()
     if mode in ("blocking", "background", "off"):
@@ -365,51 +404,68 @@ def _resolve_preload_mode(raw: str | None, onnx_ready: bool) -> str:
 
 
 def main() -> None:
-    """stdio MCP サーバーを起動する。"""
-    # 【v0.6.0〜】既定の実行系は ONNX(embed_backend=auto + export-onnx 済み)。
-    # 以下の torch 病理の記録は、ONNX 未生成のフォールバック環境に戻ると
-    # 何が起きるかの記録として残す。
+    """Start the stdio MCP server."""
+    # [Since v0.6.0] The default runtime is ONNX (embed_backend=auto +
+    # export-onnx already run). The record of the torch pathology below is
+    # kept as documentation of what happens if you fall back to an
+    # environment where the ONNX model hasn't been generated yet.
     #
-    # torch / sentence_transformers の import は非常に重い(実測: import だけで
-    # cold 50秒超)。これを mcp.run() の前にメインスレッドで実行すると initialize
-    # ハンドシェイクがその間ブロックされ、起動タイムアウトの短い MCP クライアント
-    # は接続を打ち切ってしまう(実例: Antigravity IDE の "context canceled"、
-    # Claude Code の起動タイムアウト既定30秒によるコールド起動時の断続的な不通)。
+    # Importing torch / sentence_transformers is extremely heavy (measured:
+    # import alone takes 50+ seconds cold). Running this on the main thread
+    # before mcp.run() blocks the initialize handshake for that whole time,
+    # and MCP clients with a short startup timeout give up and disconnect
+    # (observed cases: Antigravity IDE's "context canceled"; Claude Code's
+    # default 30-second startup timeout causing intermittent connection
+    # failures on cold starts).
     #
-    # 一方で、mcp.run() のイベントループ稼働中に「別スレッドで」この import を行うと
-    # Windows では桁違いに遅くなる(実測: メインスレッド 12〜24秒 → デーモン/ワーカー
-    # スレッド 約184秒。2026-07-02 の Claude Code MCP ログ2セッションで再現)。
-    # background 先読みはハンドシェイクこそ1.5秒で返すが、初回 recall がこの遅い
-    # ロードを待って 180 秒級になり、クライアントのツールタイムアウトに化ける。
-    # イベントループ停止中のスレッド import は 6 秒で終わる(単体では再現しない)
-    # ため、ループとの GIL/DLL ローダー競合とみられる。教訓: 重い import は
-    # イベントループが動き出す前にメインスレッドで済ませるのが唯一速い経路。
+    # On the other hand, doing this import "on a separate thread" while
+    # mcp.run()'s event loop is running is drastically slower on Windows
+    # (measured: main thread 12-24s -> daemon/worker thread ~184s;
+    # reproduced across two Claude Code MCP log sessions on 2026-07-02).
+    # Background preloading does return the handshake quickly (1.5s), but the
+    # first recall then has to wait for this slow load, turning into a
+    # 180-second-class stall that surfaces as a client tool timeout. Since a
+    # thread import while the event loop is stopped only takes 6 seconds (not
+    # reproducible in isolation), this looks like GIL/DLL-loader contention
+    # with the event loop. Lesson: the only reliably fast path for a heavy
+    # import is to do it on the main thread before the event loop starts.
     #
-    # 【v0.10.0〜】上記の病理が ONNX 経路には無いことを実測で確認した
-    # (2026-07-12: イベントループ稼働中のデーモンスレッドでの embedder ロードが
-    # 4.9秒 — メインスレッド 4.7秒とほぼ同じ。184秒級への劣化は torch の
-    # DLL ローダー固有)。そこで既定を auto にし、ONNX モデルが生成済みなら
-    # background(ハンドシェイク即応答・初回ツールは最大でも数秒待ち)、
-    # torch フォールバック環境では従来どおり blocking を選ぶ。
-    # 背景: 起動タイムアウトを延ばす設定が効かない MCP クライアントが実在する
-    # (実例: Codex Desktop 26.707 は startup_timeout_sec=120 を認識しつつ
-    # blocking の十数秒を待たず、初期化未完了のまま張り付いた)。
+    # [Since v0.10.0] We've confirmed by measurement that the above pathology
+    # does not occur on the ONNX path (2026-07-12: loading the embedder on a
+    # daemon thread while the event loop is running took 4.9s — almost the
+    # same as the main thread's 4.7s. The 184-second-class degradation is
+    # specific to torch's DLL loader). So the default is now auto: background
+    # (handshake responds immediately, the first tool call waits at most a
+    # few seconds) if the ONNX model has already been generated, otherwise
+    # the traditional blocking behavior in a torch-fallback environment.
+    # Background: some real MCP clients don't respect a longer startup
+    # timeout setting (observed case: Codex Desktop 26.707 recognizes
+    # startup_timeout_sec=120 but doesn't wait out blocking's dozen-plus
+    # seconds, and gets stuck without completing initialization).
     #
-    # ENGRAM_PRELOAD で先読み方式を明示できる:
-    #   auto (既定)      — ONNX 生成済みなら background、無ければ blocking。
-    #   blocking        — 起動時にメインスレッドで先読み。ハンドシェイクは import
-    #                     完了まで待つ(torch 経路では warm 12〜24秒 / cold 50秒超の
-    #                     ため、クライアント側の MCP 起動タイムアウトを 120 秒以上に
-    #                     すること。Claude Code は settings.json の env で
-    #                     MCP_TIMEOUT=120000)。接続後の recall は常に即応答する。
-    #   background      — 先読みをデーモンスレッドに回し、mcp.run() を即実行する。
-    #                     ONNX 経路では安全(初回ツールが先読み完了を数秒待つだけ)。
-    #                     torch 経路では上記の病理により Windows で初回 recall が
-    #                     3 分級になりうるので明示指定は非推奨。
-    #   off             — 先読みしない。初回ツール呼び出し時に遅延ロードする
-    #                     (torch 経路では background と同じ病理を踏む)。
-    # FastMCP は同期ツールをワーカースレッドで実行するため、_get_engine と
-    # RuriEmbedder._load はロックで多重ロードを防いでいる。
+    # ENGRAM_PRELOAD lets you force a specific preload strategy:
+    #   auto (default)  — background if ONNX has been generated, otherwise
+    #                     blocking.
+    #   blocking        — preload on the main thread at startup. The
+    #                     handshake waits for the import to finish (on the
+    #                     torch path this is warm 12-24s / cold 50+s, so set
+    #                     the client's MCP startup timeout to 120+ seconds —
+    #                     for Claude Code, set MCP_TIMEOUT=120000 in the env
+    #                     section of settings.json). Every recall after
+    #                     connecting responds immediately.
+    #   background      — run preload on a daemon thread and start mcp.run()
+    #                     immediately. Safe on the ONNX path (the first tool
+    #                     call just waits a few seconds for preload to
+    #                     finish). On the torch path, an explicit choice of
+    #                     this is discouraged, since the pathology above can
+    #                     make the first recall on Windows take 3-minute-class
+    #                     time.
+    #   off             — don't preload. Loads lazily on the first tool call
+    #                     (hits the same pathology as background on the torch
+    #                     path).
+    # Because FastMCP runs synchronous tools on a worker thread, both
+    # _get_engine and RuriEmbedder._load use a lock to prevent duplicate
+    # loading.
     from .config import get_settings, onnx_model_ready
 
     mode = _resolve_preload_mode(

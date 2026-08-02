@@ -1,7 +1,8 @@
-"""記憶力学のコア — ACT-R 活性化モデル + RRF + 拡散活性化。
+"""Core memory dynamics - ACT-R activation model + RRF + spreading activation.
 
-設計原則: 埋め込み(意味の位置)は固定し、活性度という別軸で検索順位を変調する。
-活性度はアクセスイベント列からクエリ時に都度計算する(バッチ減衰更新が不要)。
+Design principle: the embedding (semantic position) stays fixed; activation is
+a separate axis that modulates search ranking. Activation is computed fresh at
+query time from the event history, so no batch decay update is ever needed.
 """
 
 from __future__ import annotations
@@ -18,19 +19,20 @@ def decay_rate(
     d_min: float = 0.3,
     d_max: float = 0.6,
 ) -> float:
-    """記憶ごとの減衰指数 d_i(フラッシュバルブ記憶の実装)。
+    """Per-memory decay exponent d_i (implements flashbulb memory).
 
-    重大な文脈で得た記憶(高 importance)は減衰が遅く、リハーサルなしでも
-    長期間想起圏内に残る。些末な記憶は速く沈む。
-        d_i = clamp(base − spread·(importance − 5)/5, d_min, d_max)
+    Memories acquired in a significant context (high importance) decay more
+    slowly and stay recallable for a long time even without rehearsal.
+    Trivial memories sink quickly.
+        d_i = clamp(base - spread * (importance - 5) / 5, d_min, d_max)
     """
     d = base - spread * (importance - 5) / 5
     return max(d_min, min(d_max, d))
 
 
 def create_event_weight(importance: int, *, alpha: float = 2.0) -> float:
-    """初期符号化ブースト。importance 10 の記憶は誕生時点で
-    「既に複数回使われた記憶」相当の強度(w = 1 + α)で始まる。"""
+    """Initial encoding boost. A memory with importance 10 starts life already
+    at the strength (w = 1 + alpha) of a memory that's been accessed multiple times."""
     return 1.0 + alpha * (importance / 10.0)
 
 
@@ -41,11 +43,12 @@ def base_strength(
     *,
     min_elapsed: float = 60.0,
 ) -> float:
-    """ACT-R 基底レベルの内側の和 S = Σ_j w_j · (now − t_j)^(−d)。
+    """Inner sum of the ACT-R base-level activation, S = sum_j w_j * (now - t_j)^(-d).
 
-    events: (unix秒タイムスタンプ, 重み) の列。
-    経過時間は min_elapsed 秒でクランプし、直後アクセスでの発散を防ぐ。
-    未来のタイムスタンプ(時計ずれ)も min_elapsed 扱い。
+    events: a sequence of (unix-seconds timestamp, weight) pairs.
+    Elapsed time is clamped to min_elapsed seconds to prevent divergence for
+    an access that just happened. A future timestamp (clock skew) is also
+    treated as min_elapsed.
     """
     s = 0.0
     for ts, weight in events:
@@ -56,7 +59,7 @@ def base_strength(
 
 def activation(events: Iterable[tuple[float, float]], now: float, decay: float,
                *, min_elapsed: float = 60.0) -> float:
-    """ACT-R 基底レベル活性度 B = ln(S)。イベントが無ければ -inf。"""
+    """ACT-R base-level activation, B = ln(S). Returns -inf when there are no events."""
     s = base_strength(events, now, decay, min_elapsed=min_elapsed)
     return math.log(s) if s > 0 else float("-inf")
 
@@ -64,17 +67,18 @@ def activation(events: Iterable[tuple[float, float]], now: float, decay: float,
 def activation_norm(events: Iterable[tuple[float, float]], now: float, decay: float,
                     *, min_elapsed: float = 60.0,
                     center: float = -6.0, scale: float = 1.5) -> float:
-    """活性度を 0..1 に正規化した値。sigmoid((ln S − center) / scale)。
+    """Activation normalized to 0..1: sigmoid((ln S - center) / scale).
 
-    S は秒単位のべき乗減衰なので日スケールでは 1e-4〜1e-2 程度になり、
-    素朴な S/(S+1) では差が潰れる。ACT-R 本来の流儀どおり対数空間
-    (B = ln S)で比較し、シグモイドの中心・幅を日〜月スケールの差が
-    判別域(おおよそ 0.1〜0.9)に乗るよう校正している:
-      - 作成直後:               ≈ 0.95(強い新近性)
-      - 1日前に1回アクセス:      ≈ 0.55
-      - 90日放置(importance 5): ≈ 0.25
-      - 90日放置(importance 10):≈ 0.8 (フラッシュバルブ)
-    S=0(イベント無し)→ 0。再ランクの加重和に直接使える。
+    S is a power-law decay measured in seconds, so on a day-scale it lands
+    around 1e-4 to 1e-2, and a naive S/(S+1) flattens the differences. As in
+    the original ACT-R approach, we compare in log space (B = ln S), with the
+    sigmoid's center and scale calibrated so that day-to-month-scale
+    differences land in the discriminative range (roughly 0.1-0.9):
+      - just created:                    ~0.95 (strong recency)
+      - accessed once, 1 day ago:        ~0.55
+      - untouched for 90 days (importance 5):  ~0.25
+      - untouched for 90 days (importance 10): ~0.8 (flashbulb memory)
+    S=0 (no events) -> 0. Usable directly in the re-rank weighted sum.
     """
     s = base_strength(events, now, decay, min_elapsed=min_elapsed)
     if s <= 0.0:
@@ -91,8 +95,9 @@ def final_score(
     w_activation: float = 0.25,
     w_importance: float = 0.15,
 ) -> float:
-    """検索の最終スコア。関連度を支配的にし、活性度・重要度は変調に留める
-    (よく使う記憶が無関係な文脈に出しゃばる富者益富ループの防止)。"""
+    """Final search score. Relevance dominates; activation and importance only
+    modulate it (preventing a rich-get-richer loop where frequently used
+    memories intrude into unrelated contexts)."""
     return (
         w_relevance * relevance
         + w_activation * act_norm
@@ -105,23 +110,29 @@ def normalize_relevances(
     *,
     floor: float = 0.10,
 ) -> dict[str, float]:
-    """候補集合内で関連度を min-max 正規化する(Generative Agents 流)。
+    """Min-max normalize relevance within the candidate set (Generative Agents style).
 
-    埋め込みのコサイン類似度は狭い帯に圧縮されがちで(Ruri で 0.8〜0.87、
-    実データで確認)、素の値を final_score の加重和に使うと関連度の弁別力が
-    名目の重み(w_relevance=0.6)より遥かに小さくなり、活性度・重要度の下駄が
-    事実上ランキングを支配する(=汎用の高活性記憶が無関係なクエリに出しゃばる)。
-    加重和の典拠である Generative Agents (Park et al. 2023) は各成分を
-    検索候補内で min-max 正規化してから加重和しており、それに倣う。
+    Embedding cosine similarity tends to compress into a narrow band (with
+    prefix-style Japanese models such as Ruri, 0.8-0.87, confirmed on real
+    data). Feeding the raw value into final_score's weighted sum makes
+    relevance's discriminative power far smaller than its nominal weight
+    (w_relevance=0.6), letting the activation/importance floor effectively
+    dominate the ranking (i.e. a generically high-activation memory intrudes
+    into an unrelated query). Generative Agents (Park et al. 2023), the
+    source for this weighted-sum design, min-max normalizes each component
+    within the retrieval candidate set before summing; we follow that.
 
-    分母には floor を敷く: spread = max(max−min, floor)。
-    候補全体が同程度の関連度しか持たない(=クエリが弁別的でない)とき、
-    微小差を 0..1 へ増幅せず、関連度の寄与を実際の差に比例して縮める。
-    このとき順位は活性度・重要度側に委ねられる(ACT-R でいう、手がかりが
-    弱いときの基底レベル活性度へのフォールバックに相当)。
+    A floor is applied to the denominator: spread = max(max - min, floor).
+    When the whole candidate set has similar relevance (i.e. the query isn't
+    discriminative), tiny differences are not amplified to 0..1; instead
+    relevance's contribution is scaled down in proportion to the actual
+    difference, and ranking falls back to activation/importance (analogous to
+    ACT-R's fallback to base-level activation when the retrieval cue is
+    weak).
 
-    正規化値は順位付け専用。報告用 relevance・しきい値判定
-    (deep/exhaustive 自動発動、surface の関連度ゲート)は生値を使い続けること。
+    The normalized value is ranking-only. Reported relevance and threshold
+    checks (deep/exhaustive auto-trigger, the surface relevance gate) must
+    keep using the raw value.
     """
     if not relevances:
         return {}
@@ -131,10 +142,10 @@ def normalize_relevances(
 
 
 def rrf_merge(rankings: Sequence[Sequence[str]], *, k: int = 60) -> dict[str, float]:
-    """Reciprocal Rank Fusion。複数の順位リスト(ベクトル近傍・BM25 等)を統合する。
+    """Reciprocal Rank Fusion. Merges multiple rankings (vector neighbors, BM25, etc.).
 
-    score(id) = Σ_r 1/(k + rank_r(id))   (rank は 1 始まり、リストに無ければ寄与 0)
-    戻り値はスコア降順を保証しない dict。呼び出し側でソートする。
+    score(id) = sum_r 1/(k + rank_r(id))  (rank is 1-based; contributes 0 if absent from a list)
+    The returned dict is not guaranteed to be sorted by score descending; sort it at the call site.
     """
     scores: dict[str, float] = {}
     for ranking in rankings:
@@ -150,13 +161,14 @@ def spread(
     max_hops: int = 2,
     hop_decay: float = 0.7,
 ) -> dict[str, float]:
-    """拡散活性化(deep recall の「辿れば必ず引っ張ってこれる」の実装)。
+    """Spreading activation (implements deep recall's "follow the links and you
+    can always pull it in" guarantee).
 
-    seeds の各記憶から連想リンクを max_hops まで広げ、
-        propagated = seed_score · Π_hop (link_weight · hop_decay)
-    を伝播する。複数経路で到達した場合は最大値を採る。
-    neighbors(id) は (隣接id, リンク重み 0..1) を返す関数。
-    戻り値は seed 自身を含む全到達ノードのスコア(seed は元の値を保持)。
+    From each memory in seeds, follows associative links out to max_hops, propagating
+        propagated = seed_score * product_over_hops(link_weight * hop_decay)
+    When a node is reached via multiple paths, the maximum is kept.
+    neighbors(id) is a function returning (neighbor_id, link_weight 0..1) pairs.
+    Returns scores for every reached node including the seeds themselves (seeds keep their original value).
     """
     best: dict[str, float] = dict(seeds)
     frontier: dict[str, float] = dict(seeds)

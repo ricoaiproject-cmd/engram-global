@@ -1,4 +1,4 @@
-"""transcript 要約(①自動符号化)のテスト。"""
+"""Tests for transcript summarization (auto-encoding)."""
 
 from __future__ import annotations
 
@@ -47,15 +47,15 @@ def test_extract_messages_skips_noise(tmp_path):
         _user("Caveat: The messages below were generated..."),
         {"type": "user", "isMeta": True,
          "message": {"role": "user", "content": "メタ行"}},
-        # tool_result だけのユーザー行(テキストブロックなし)
+        # a user line that has only a tool_result (no text block)
         {"type": "user",
          "message": {"role": "user", "content": [
              {"type": "tool_result", "tool_use_id": "x", "content": "result"}
          ]}},
         _user("本物の発言です"),
-        "壊れた行",  # json だが dict でない
+        "壊れた行",  # valid json but not a dict
     ])
-    # 壊れた JSON 行も混ぜる
+    # also mix in a broken JSON line
     with p.open("a", encoding="utf-8") as f:
         f.write("{not json}\n")
     m = extract_messages(p)
@@ -75,16 +75,16 @@ def test_build_episode_normal(tmp_path):
     assert ep is not None
     assert "2026-06-12" in ep
     assert "demo" in ep
-    assert "計画書の作成" in ep            # summary が表題になる
+    assert "計画書の作成" in ep            # the summary becomes the title
     assert "計画書のたたき台" in ep
-    assert "結末" in ep
+    assert "Outcome" in ep
 
 
 def test_build_episode_skips_trivial():
-    # 発言なし
+    # no utterances
     assert build_episode({"user_texts": [], "last_assistant": "x"},
                          date_str="2026-06-12") is None
-    # 発言が短すぎる
+    # utterance too short
     assert build_episode({"user_texts": ["ok"], "last_assistant": ""},
                          date_str="2026-06-12") is None
 
@@ -95,7 +95,7 @@ def test_build_episode_caps_user_items():
                         "summary": ""},
                        date_str="2026-06-12", max_user_items=6)
     assert ep is not None
-    assert "(ほか" in ep
-    # 最初と最後は必ず拾う
+    assert "(and" in ep
+    # the first and last are always picked up
     assert "発言その0" in ep
     assert "発言その19" in ep

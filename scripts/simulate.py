@@ -1,17 +1,21 @@
-"""30日アクセスパターンのシミュレーション。
+"""Simulation of a 30-day access pattern.
 
-FakeEmbedder + 一時ディレクトリで記憶200件を投入し、合成クロック(now 引数注入)で
-30日分のアクセスパターンを模擬する。
+Ingests 200 memories with FakeEmbedder + a temp directory, then simulates
+30 days of access patterns using a synthetic clock (injected via the `now`
+argument).
 
-乱数は seed 固定で決定的。
+Randomness is deterministic via a fixed seed.
 
-レポート内容:
-1. reinforce された記憶が関連クエリの recall で上位に浮上していること
-2. 放置記憶は fast では沈むが deep(連想リンク経由)で発見できること
-3. importance 9 の未使用記憶が importance 2 の未使用記憶より上位に残ること
+Report contents:
+1. Reinforced memories rank highly in recall for related queries
+2. Neglected memories sink in fast recall but can still be found via deep
+   (associative links)
+3. An unused memory with importance 9 stays ranked above an unused memory
+   with importance 2
 
-使い方: python scripts/simulate.py
-(db / store が完成後に使用可能。現時点では NotImplementedError で失敗する想定)
+Usage: python scripts/simulate.py
+(Usable once db / store are complete. Currently expected to fail with
+NotImplementedError.)
 """
 
 from __future__ import annotations
@@ -22,11 +26,11 @@ import tempfile
 import time
 from pathlib import Path
 
-# Windows コンソール(cp932)でも ✓ 等を出せるよう UTF-8 に再構成
+# Reconfigure to UTF-8 so marks like ✓ print correctly even on a Windows console (cp932)
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-# プロジェクトの src を PYTHONPATH に追加
+# Add the project's src to PYTHONPATH
 _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -35,20 +39,20 @@ from engram.config import Settings
 from engram.embedder import FakeEmbedder
 from engram.engine import MemoryEngine, build_engine
 
-# --- 定数 ---
+# --- constants ---
 SEED = 42
 N_MEMORIES = 200
 DAY = 86400.0
-START_TIME = 1_750_000_000.0  # シミュレーション開始時刻(固定)
+START_TIME = 1_750_000_000.0  # simulation start time (fixed)
 N_DAYS = 30
 
-# 定期的に使われる「アクティブ」記憶の数
+# Number of "active" memories used regularly
 N_ACTIVE = 30
-# リンクで連鎖を作る記憶のペア数
+# Number of memory pairs to chain together with links
 N_LINK_PAIRS = 20
 
-# カテゴリ別の記憶テンプレート(FakeEmbedder が n-gram 類似度を使うため、
-# 同カテゴリ内で語が被るように設計)
+# Memory templates by category (designed so words overlap within the same
+# category, since FakeEmbedder uses n-gram similarity)
 KNOWLEDGE_TEMPLATES = [
     "Pythonの非同期処理(asyncio)について: コルーチンを使う",
     "Pythonの型ヒント: TypeVar と Generic の使い方",
@@ -87,32 +91,32 @@ def run_simulation():
             candidate_k=50,
             deep_score_threshold=0.35,
         )
-        # dim=64 はハッシュ衝突で無関係テキスト同士も cos≈0.5 になるため 256
+        # dim=64 causes hash collisions where even unrelated texts get cos≈0.5, so use 256
         embedder = FakeEmbedder(dim=256)
         engine = build_engine(settings, embedder=embedder)
         try:
             return _run(engine, rng)
         finally:
-            # Windows では DB を閉じないと一時ディレクトリの削除に失敗する
+            # On Windows, the temp directory fails to delete unless the DB is closed first
             engine.db.close()
 
 
 def _run(engine: MemoryEngine, rng: random.Random):
 
         print("=" * 60)
-        print("engram 30日アクセスパターン シミュレーション")
+        print("engram 30-day access pattern simulation")
         print("=" * 60)
 
         # ----------------------------------------------------------------
-        # Phase 1: 記憶200件を投入(day 0)
+        # Phase 1: ingest 200 memories (day 0)
         # ----------------------------------------------------------------
-        print(f"\n[Phase 1] 記憶 {N_MEMORIES} 件を投入中...")
+        print(f"\n[Phase 1] Ingesting {N_MEMORIES} memories...")
         t0 = START_TIME
         memory_ids: list[str] = []
         importance_map: dict[str, int] = {}
 
         for i in range(N_MEMORIES):
-            # テンプレートをループしながら本文を生成
+            # Generate body text while cycling through templates
             if i < N_MEMORIES // 2:
                 templates = KNOWLEDGE_TEMPLATES
                 mem_type = "knowledge"
@@ -121,8 +125,9 @@ def _run(engine: MemoryEngine, rng: random.Random):
                 mem_type = "episode"
 
             template = templates[i % len(templates)]
-            # テンプレートだけだと連番違いの本文が重複検知(cos >= 0.92)に
-            # 併合されてしまうため、個別の詳細文を足して各記憶を一意にする
+            # Using only the template would let bodies differing solely by index
+            # get merged by duplicate detection (cos >= 0.92), so add individual
+            # detail sentences to make each memory unique
             detail_words = ["実装時の注意点", "設計上の根拠", "計測した結果",
                             "失敗例の分析", "代替案との比較", "運用での知見",
                             "境界条件の確認", "性能への影響", "互換性の検討",
@@ -132,17 +137,17 @@ def _run(engine: MemoryEngine, rng: random.Random):
                        f"観点: {details[0]}、{details[1]}、{details[2]}。"
                        f"整理番号 {i * 7919 % 100000}。")
 
-            # importanceを割り当て
-            # - アクティブ記憶(最初の N_ACTIVE 件): importance 5-8
-            # - importance 9 の特別記憶(インデックス N_ACTIVE): 1件
-            # - importance 2 の低優先記憶(インデックス N_ACTIVE+1): 1件
-            # - 残りは importance 3-6
+            # Assign importance
+            # - Active memories (first N_ACTIVE): importance 5-8
+            # - One special memory with importance 9 (index N_ACTIVE)
+            # - One low-priority memory with importance 2 (index N_ACTIVE+1)
+            # - The rest: importance 3-6
             if i < N_ACTIVE:
                 importance = rng.randint(5, 8)
             elif i == N_ACTIVE:
-                importance = 9   # 高重要度の未使用記憶
+                importance = 9   # high-importance unused memory
             elif i == N_ACTIVE + 1:
-                importance = 2   # 低重要度の未使用記憶
+                importance = 2   # low-importance unused memory
             else:
                 importance = rng.randint(3, 6)
 
@@ -151,7 +156,7 @@ def _run(engine: MemoryEngine, rng: random.Random):
                 type=mem_type,
                 importance=importance,
                 source="simulate",
-                now=t0 + i * 10,  # 10秒間隔で投入
+                now=t0 + i * 10,  # ingest at 10-second intervals
             )
 
             if result["status"] in ("created", "duplicate_reinforced"):
@@ -159,13 +164,14 @@ def _run(engine: MemoryEngine, rng: random.Random):
                 memory_ids.append(mem_id)
                 importance_map[mem_id] = importance
 
-        print(f"  投入完了: {len(memory_ids)} 件")
+        print(f"  Ingest complete: {len(memory_ids)} memories")
 
-        # アクティブ記憶 ID とその他を分類
+        # Classify active memory IDs vs. the rest
         active_ids = memory_ids[:N_ACTIVE]
 
-        # Report 3 用の特別ペア: 同じキーワードを共有し(=候補集合に両方入る)、
-        # importance だけが違う2記憶。どちらも以後一切アクセスしない
+        # Special pair for Report 3: two memories that share a keyword (so
+        # both enter the candidate set) and differ only in importance.
+        # Neither is ever accessed again after this.
         high_res = engine.remember(
             "Xyzzy復旧手順: 本番障害時はまずスナップショットを確保してから再起動する",
             type="knowledge", importance=9, source="simulate", now=t0 + 3000,
@@ -178,9 +184,9 @@ def _run(engine: MemoryEngine, rng: random.Random):
         low_imp_id = low_res["id"]
 
         # ----------------------------------------------------------------
-        # Phase 2: リンクの連鎖を作る
+        # Phase 2: build a chain of links
         # ----------------------------------------------------------------
-        print(f"\n[Phase 2] {N_LINK_PAIRS} ペアのリンク連鎖を作成中...")
+        print(f"\n[Phase 2] Creating a chain of {N_LINK_PAIRS} link pairs...")
         inactive_ids = memory_ids[N_ACTIVE + 2:]
         link_pairs: list[tuple[str, str]] = []
         sampled = rng.sample(inactive_ids, min(N_LINK_PAIRS * 2, len(inactive_ids)))
@@ -188,68 +194,68 @@ def _run(engine: MemoryEngine, rng: random.Random):
             src, dst = sampled[i], sampled[i + 1]
             engine.link(src, dst)
             link_pairs.append((src, dst))
-        print(f"  リンク作成完了: {len(link_pairs)} ペア")
+        print(f"  Link creation complete: {len(link_pairs)} pairs")
 
         # ----------------------------------------------------------------
-        # Phase 3: 30日間のアクセスパターンを模擬
+        # Phase 3: simulate 30 days of access patterns
         # ----------------------------------------------------------------
-        print(f"\n[Phase 3] {N_DAYS}日間のアクセスパターンを模擬中...")
+        print(f"\n[Phase 3] Simulating {N_DAYS} days of access patterns...")
 
         for day in range(1, N_DAYS + 1):
             day_ts = START_TIME + day * DAY
 
-            # アクティブ記憶を毎日 recall + reinforce(使用されている記憶)
+            # Recall + reinforce active memories every day (memories in actual use)
             n_daily_active = rng.randint(3, 8)
             daily_active = rng.sample(active_ids, min(n_daily_active, len(active_ids)))
 
-            # recall イベントを記録
+            # Record recall events
             for mem_id in daily_active:
                 engine.db.add_event(mem_id, "recall_hit",
                                     engine.settings.recall_hit_weight, day_ts)
 
-            # 3日おきに reinforce
+            # Reinforce every 3 days
             if day % 3 == 0:
                 strength = rng.uniform(1.0, 2.5)
                 engine.reinforce(daily_active, strength=strength, now=day_ts)
 
-        print("  アクセスパターン模擬完了")
+        print("  Access pattern simulation complete")
 
         # ----------------------------------------------------------------
-        # Phase 4: レポート
+        # Phase 4: report
         # ----------------------------------------------------------------
         print("\n" + "=" * 60)
-        print("レポート")
+        print("Report")
         print("=" * 60)
 
         sim_now = START_TIME + N_DAYS * DAY
 
-        # --- Report 1: reinforce された記憶が関連クエリで上位に浮上 ---
-        print("\n[Report 1] reinforce 済み記憶の recall 順位")
-        query = KNOWLEDGE_TEMPLATES[0]  # アクティブ記憶のテンプレート1
+        # --- Report 1: reinforced memories rank highly for related queries ---
+        print("\n[Report 1] Recall rank of reinforced memories")
+        query = KNOWLEDGE_TEMPLATES[0]  # template 1 of the active memories
         result = engine.recall(query, mode="fast", limit=10, now=sim_now, record_hits=False)
         hits = result["hits"]
         hit_ids_top10 = [h["id"] for h in hits]
         active_in_top10 = [id_ for id_ in hit_ids_top10 if id_ in active_ids]
 
-        print(f"  クエリ: '{query[:50]}...'")
-        print(f"  上位10件中、アクティブ(reinforce済み)記憶: {len(active_in_top10)} 件")
+        print(f"  Query: '{query[:50]}...'")
+        print(f"  Active (reinforced) memories in the top 10: {len(active_in_top10)}")
         for h in hits[:5]:
-            is_active = "(アクティブ)" if h["id"] in active_ids else ""
+            is_active = "(active)" if h["id"] in active_ids else ""
             print(f"    [..{h['id'][-8:]}] score={h['score']:.3f} "
                   f"act={h['activation']:.3f} {is_active}")
 
         r1_passed = len(active_in_top10) > 0
-        print(f"  結果: {'PASS ✓' if r1_passed else 'FAIL ✗'} "
-              f"(アクティブ記憶が上位に浮上{'している' if r1_passed else 'していない'})")
+        print(f"  Result: {'PASS ✓' if r1_passed else 'FAIL ✗'} "
+              f"(active memories {'do' if r1_passed else 'do not'} surface near the top)")
 
-        # --- Report 2: 放置記憶は fast では沈むが deep で発見できる ---
-        print("\n[Report 2] 放置記憶の fast vs deep 発見率")
+        # --- Report 2: neglected memories sink in fast but can be found via deep ---
+        print("\n[Report 2] Neglected-memory discovery rate: fast vs deep")
         if link_pairs:
-            # リンクの src(放置記憶)に関連するクエリで検索
+            # Search with a query related to the link's src (the neglected memory)
             src_id, dst_id = link_pairs[0]
 
             fast_result = engine.recall(
-                EPISODE_TEMPLATES[0],  # 放置記憶のテンプレートに近いクエリ
+                EPISODE_TEMPLATES[0],  # a query close to the neglected memory's template
                 mode="fast", limit=10, now=sim_now, record_hits=False
             )
             deep_result = engine.recall(
@@ -260,30 +266,30 @@ def _run(engine: MemoryEngine, rng: random.Random):
             fast_ids = {h["id"] for h in fast_result["hits"]}
             deep_ids = {h["id"] for h in deep_result["hits"]}
 
-            # リンク先(dst_id)が deep にのみ現れるか確認
+            # Check whether the link target (dst_id) appears only in deep
             assoc_in_deep = any(
                 h["id"] in {dst for _, dst in link_pairs} and h["via"] == "associative"
                 for h in deep_result["hits"]
             )
 
-            print(f"  Fast recall でヒット数: {len(fast_ids)}")
-            print(f"  Deep recall でヒット数: {len(deep_ids)}")
-            print(f"  連想リンク経由ノードが deep で発見: {assoc_in_deep}")
+            print(f"  Fast recall hit count: {len(fast_ids)}")
+            print(f"  Deep recall hit count: {len(deep_ids)}")
+            print(f"  Node found via associative link in deep: {assoc_in_deep}")
 
             deep_assoc_hits = [h for h in deep_result["hits"] if h["via"] == "associative"]
-            print(f"  Deep のみ(via=associative)ヒット: {len(deep_assoc_hits)} 件")
+            print(f"  Deep-only (via=associative) hits: {len(deep_assoc_hits)}")
 
             r2_passed = len(deep_ids) >= len(fast_ids)
-            print(f"  結果: {'PASS ✓' if r2_passed else 'FAIL ✗'} "
-                  f"(deep が fast 以上の件数{'ヒット' if r2_passed else 'ヒットせず'})")
+            print(f"  Result: {'PASS ✓' if r2_passed else 'FAIL ✗'} "
+                  f"(deep {'hit' if r2_passed else 'did not hit'} at least as many as fast)")
         else:
-            print("  (リンクペアなし、スキップ)")
+            print("  (no link pairs, skipping)")
             r2_passed = True
 
-        # --- Report 3: importance 9 の未使用記憶が importance 2 より上位 ---
-        print("\n[Report 3] 未使用記憶の importance による順位差")
+        # --- Report 3: an unused importance-9 memory outranks importance 2 ---
+        print("\n[Report 3] Rank gap by importance for unused memories")
         if high_imp_id and low_imp_id:
-            # 両方の記憶が共有する専用キーワードで検索(両方を候補集合に乗せる)
+            # Search on the dedicated keyword shared by both memories (puts both in the candidate set)
             result = engine.recall(
                 "Xyzzy復旧手順", mode="fast", limit=50,
                 now=sim_now, record_hits=False
@@ -293,31 +299,32 @@ def _run(engine: MemoryEngine, rng: random.Random):
             rank_high = rank_map.get(high_imp_id, 9999)
             rank_low = rank_map.get(low_imp_id, 9999)
 
-            print(f"  importance 9 の未使用記憶 [{high_imp_id[:8]}]: 順位 {rank_high + 1}")
-            print(f"  importance 2 の未使用記憶 [{low_imp_id[:8]}]: 順位 {rank_low + 1}")
+            print(f"  Unused importance-9 memory [{high_imp_id[:8]}]: rank {rank_high + 1}")
+            print(f"  Unused importance-2 memory [{low_imp_id[:8]}]: rank {rank_low + 1}")
 
-            # 本文が違う以上、クエリとの関連度には正当な差が出る。符号化の深さ
-            # (フラッシュバルブ効果)を見るには関連度の寄与を除いた成分
-            # (活性度 + 重要度)で比較する
+            # Since the bodies differ, there's a legitimate difference in relevance
+            # to the query. To observe encoding depth (the flashbulb effect),
+            # compare the component with relevance's contribution removed
+            # (activation + importance)
             hit_high = next((h for h in result["hits"] if h["id"] == high_imp_id), None)
             hit_low = next((h for h in result["hits"] if h["id"] == low_imp_id), None)
             w_rel = engine.settings.w_relevance
             enc_high = (hit_high["score"] - w_rel * hit_high["relevance"]) if hit_high else 0.0
             enc_low = (hit_low["score"] - w_rel * hit_low["relevance"]) if hit_low else 0.0
-            print(f"  importance 9 符号化成分(活性度+重要度): {enc_high:.4f}")
-            print(f"  importance 2 符号化成分(活性度+重要度): {enc_low:.4f}")
+            print(f"  importance 9 encoding component (activation+importance): {enc_high:.4f}")
+            print(f"  importance 2 encoding component (activation+importance): {enc_low:.4f}")
 
             r3_passed = enc_high > enc_low
-            print(f"  結果: {'PASS ✓' if r3_passed else 'FAIL ✗'} "
-                  f"(高 importance が{'上位' if r3_passed else '下位'})")
+            print(f"  Result: {'PASS ✓' if r3_passed else 'FAIL ✗'} "
+                  f"(higher importance ranks {'higher' if r3_passed else 'lower'})")
         else:
-            print("  (importance テスト用記憶なし、スキップ)")
+            print("  (no memories for the importance test, skipping)")
             r3_passed = True
 
-        # --- 総合結果 ---
+        # --- overall result ---
         print("\n" + "=" * 60)
         all_passed = r1_passed and r2_passed and r3_passed
-        print(f"総合結果: {'全テスト PASS ✓' if all_passed else '一部 FAIL ✗'}")
+        print(f"Overall result: {'ALL TESTS PASS ✓' if all_passed else 'SOME FAILED ✗'}")
         print("=" * 60)
 
         return all_passed

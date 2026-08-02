@@ -1,4 +1,4 @@
-"""ENGRAM_PRELOAD の auto 解決と ONNX 判定ヘルパーのテスト(v0.10.0)。"""
+"""Tests for ENGRAM_PRELOAD's auto resolution and the ONNX readiness helper (v0.10.0)."""
 
 from __future__ import annotations
 
@@ -7,19 +7,19 @@ from engram.embedder import OnnxRuriEmbedder
 from engram.server import _resolve_preload_mode
 
 
-# --- _resolve_preload_mode(純粋関数) ---
+# --- _resolve_preload_mode (pure function) ---
 
 def test_auto_resolves_by_onnx_availability():
-    """auto(既定)は ONNX 生成済みなら background、無ければ blocking。"""
+    """auto (the default) resolves to background if ONNX has been generated, blocking otherwise."""
     assert _resolve_preload_mode("auto", onnx_ready=True) == "background"
     assert _resolve_preload_mode("auto", onnx_ready=False) == "blocking"
-    # 未設定(None)も auto と同じ
+    # Unset (None) resolves the same as auto
     assert _resolve_preload_mode(None, onnx_ready=True) == "background"
     assert _resolve_preload_mode(None, onnx_ready=False) == "blocking"
 
 
 def test_explicit_modes_are_respected():
-    """明示値は ONNX の有無に関わらずそのまま通す。"""
+    """An explicit value passes through unchanged, regardless of ONNX availability."""
     for ready in (True, False):
         assert _resolve_preload_mode("blocking", onnx_ready=ready) == "blocking"
         assert _resolve_preload_mode("background", onnx_ready=ready) == "background"
@@ -27,13 +27,14 @@ def test_explicit_modes_are_respected():
 
 
 def test_unknown_values_fall_back_to_auto():
-    """未知の値(タイポ等)は auto と同じ解決(旧実装の「off 以外は background」から変更)。"""
+    """Unknown values (e.g. typos) resolve the same as auto (changed from the old
+    implementation's "anything but off means background")."""
     assert _resolve_preload_mode("bckground", onnx_ready=False) == "blocking"
     assert _resolve_preload_mode("bckground", onnx_ready=True) == "background"
-    assert _resolve_preload_mode("  Blocking  ", onnx_ready=True) == "blocking"  # 空白と大文字は正規化
+    assert _resolve_preload_mode("  Blocking  ", onnx_ready=True) == "blocking"  # whitespace and case are normalized
 
 
-# --- onnx_model_ready(config 側の軽量判定) ---
+# --- onnx_model_ready (the lightweight check on the config side) ---
 
 def _make_model_dir(tmp_path, *files):
     d = tmp_path / "onnx" / "model"
@@ -54,7 +55,7 @@ def test_onnx_model_ready_requires_all_three_files(tmp_path):
 
 
 def test_embedder_is_available_agrees_with_config_helper(tmp_path):
-    """embedder.is_available は config.onnx_model_ready へ委譲している(乖離防止)。"""
+    """embedder.is_available delegates to config.onnx_model_ready (prevents the two from drifting apart)."""
     complete = _make_model_dir(tmp_path, "model.onnx", "tokenizer.json", "meta.json")
     partial = _make_model_dir(tmp_path / "y", "meta.json")
     for d in (complete, partial, tmp_path / "nope"):

@@ -1,8 +1,9 @@
-"""連想想起の標的検証。
+"""Targeted verification of associative recall.
 
-「クエリと意味的に遠い(ベクトル検索では出ない)が、関連記憶とリンクで
-繋がっている記憶」が deep recall で via="associative" として発見されることを
-確認する。構想の核心(辿れば必ず引っ張ってこれる)の直接テスト。
+Confirms that "a memory that is semantically far from the query (won't
+surface via vector search) but is link-connected to a related memory"
+is found by deep recall as via="associative". A direct test of the core
+idea (if it's linked, following the trail will always retrieve it).
 """
 
 from __future__ import annotations
@@ -26,14 +27,14 @@ T0 = 1_750_000_000.0
 
 with tempfile.TemporaryDirectory() as tmpdir:
     tmp = Path(tmpdir)
-    # candidate_k をコーパスより小さくし、ベクトル検索の網に
-    # 「意味的に遠い記憶」が入らない状況を作る(実運用の縮図)
+    # Make candidate_k smaller than the corpus so the vector-search net
+    # excludes "semantically far memories" (a microcosm of real usage)
     settings = Settings(memories_dir=tmp / "memories", data_dir=tmp / "data",
                         candidate_k=10)
-    # dim=64 はハッシュ衝突で無関係テキスト同士も cos≈0.5 になりノイズが大きい
+    # dim=64 causes hash collisions where even unrelated texts get cos≈0.5, too noisy
     engine = build_engine(settings, embedder=FakeEmbedder(dim=256))
     try:
-        # ノイズ: クエリと無関係な記憶を多数(重複検知を避けるため文面を変える)
+        # Noise: many memories unrelated to the query (vary the wording to avoid dedup detection)
         topics = ["予算配分", "採用面接", "週次定例", "顧客訪問", "障害対応訓練",
                   "棚卸し作業", "契約更新", "備品発注", "勉強会準備", "評価面談"]
         for i in range(60):
@@ -42,20 +43,20 @@ with tempfile.TemporaryDirectory() as tmpdir:
                 type="knowledge", importance=4, now=T0,
             )
 
-        # ハブ: クエリと意味的に近い記憶
+        # Hub: a memory semantically close to the query
         hub = engine.remember(
             "SQLiteのWALモードでは書き込みと読み取りが並行できる",
             type="knowledge", importance=6, now=T0,
         )
 
-        # 孤立記憶: クエリと意味的に遠い(語彙の重なりなし)が、ハブとリンク
+        # Isolated memory: semantically far from the query (no vocabulary overlap), but linked to the hub
         iso = engine.remember(
             "圧力鍋で豚の角煮を作るときは下茹でを30分する",
             type="knowledge", importance=5, now=T0,
         )
         engine.link(hub["id"], iso["id"])
 
-        # 孤立記憶を cold に落とす(古い未使用記憶を模擬)
+        # Drop the isolated memory to cold tier (simulates an old, unused memory)
         rec = engine.store.find_by_id(iso["id"])
         engine.store.set_tier(rec, "cold")
         engine.db.set_tier(iso["id"], "cold")
@@ -69,16 +70,16 @@ with tempfile.TemporaryDirectory() as tmpdir:
         fast_ids = [h["id"] for h in fast["hits"]]
         deep_hits = {h["id"]: h for h in deep["hits"]}
 
-        print(f"fast に孤立記憶が出る(出ないのが正): {iso['id'] in fast_ids}")
+        print(f"Isolated memory appears in fast (should be False): {iso['id'] in fast_ids}")
         in_deep = iso["id"] in deep_hits
-        print(f"deep に孤立記憶が出る(出るのが正): {in_deep}")
+        print(f"Isolated memory appears in deep (should be True): {in_deep}")
         if in_deep:
             h = deep_hits[iso["id"]]
             print(f"  via={h['via']} score={h['score']:.3f} "
                   f"relevance={h['relevance']:.3f} tier={h['tier']}")
         ok = (iso["id"] not in fast_ids) and in_deep \
             and deep_hits[iso["id"]]["via"] == "associative"
-        print(f"\n結果: {'PASS' if ok else 'FAIL'}")
+        print(f"\nResult: {'PASS' if ok else 'FAIL'}")
         sys.exit(0 if ok else 1)
     finally:
         engine.db.close()

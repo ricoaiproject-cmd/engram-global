@@ -1,4 +1,4 @@
-"""IndexDB のテスト。"""
+"""Tests for IndexDB."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _upsert(db: IndexDB, embedder: FakeEmbedder, id: str, content: str,
 
 
 # ---------------------------------------------------------------------------
-# スキーマ初期化
+# Schema initialization
 # ---------------------------------------------------------------------------
 
 def test_schema_init(tmp_path):
@@ -74,7 +74,7 @@ def test_parent_dir_created(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# dim 不一致
+# dim mismatch
 # ---------------------------------------------------------------------------
 
 def test_dim_mismatch_raises(tmp_path):
@@ -116,7 +116,7 @@ def test_upsert_updates_existing(db, embedder):
 
 
 # ---------------------------------------------------------------------------
-# vector_search: 類似テキストが上位 + tier/type フィルタ
+# vector_search: similar text ranks first + tier/type filters
 # ---------------------------------------------------------------------------
 
 def test_vector_search_similar_first(db, embedder):
@@ -165,7 +165,7 @@ def test_vector_search_empty_db(db, embedder):
 
 
 # ---------------------------------------------------------------------------
-# keyword_search: 日本語・英語、trigram(3文字以上)
+# keyword_search: Japanese and English, trigram (3+ characters)
 # ---------------------------------------------------------------------------
 
 def test_keyword_search_english(db, embedder):
@@ -187,13 +187,13 @@ def test_keyword_search_japanese(db, embedder):
 
 def test_keyword_search_short_query_no_match_returns_empty(db, embedder):
     _upsert(db, embedder, "x1", "test content here")
-    # 3文字未満は LIKE フォールバック。部分一致しなければ空
+    # Under 3 characters falls back to LIKE. Empty if no partial match
     assert db.keyword_search("ab", k=5) == []
     assert db.keyword_search("a", k=5) == []
 
 
 # ---------------------------------------------------------------------------
-# keyword_search: 短クエリの LIKE フォールバック(trigram 非対応領域)
+# keyword_search: LIKE fallback for short queries (below trigram range)
 # ---------------------------------------------------------------------------
 
 def test_keyword_search_short_query_like_fallback(db, embedder):
@@ -201,7 +201,7 @@ def test_keyword_search_short_query_like_fallback(db, embedder):
     _upsert(db, embedder, "m2", "全く関係ない内容のメモ")
     results = db.keyword_search("会議", k=5)
     assert [r[0] for r in results] == ["m1"]
-    # 擬似スコアも BM25 と同じ「負値・小さいほど良い」向き
+    # The pseudo-score follows the same convention as BM25: negative, lower is better
     assert results[0][1] < 0
 
 
@@ -211,7 +211,7 @@ def test_keyword_search_short_query_rare_scores_better_than_common(db, embedder)
         _upsert(db, embedder, f"c{i}", f"会議メモその{i}")
     rare = db.keyword_search("稟議", k=5)
     common = db.keyword_search("会議", k=5)
-    # 希少語(df=1/6)はありふれた語(df=5/6)よりスコアが良い(より負)
+    # A rare term (df=1/6) scores better (more negative) than a common term (df=5/6)
     assert rare[0][1] < common[0][1]
 
 
@@ -232,15 +232,15 @@ def test_keyword_search_short_query_respects_tier_filter(db, embedder):
 def test_keyword_search_short_query_multi_token_and(db, embedder):
     _upsert(db, embedder, "both", "AB 棟の会議は火曜")
     _upsert(db, embedder, "one", "CD 棟の会議は水曜")
-    # 全トークンが3文字未満 → LIKE の AND
+    # All tokens under 3 characters -> AND of LIKE clauses
     results = db.keyword_search("AB 会議", k=5)
     assert [r[0] for r in results] == ["both"]
 
 
 def test_keyword_search_mixed_query_drops_short_tokens(db, embedder):
     _upsert(db, embedder, "room", "第3会議室の予約方法について")
-    # 旧実装では 2文字トークン "AB" が MATCH 全体を0件にしていた。
-    # 新実装は3文字以上のトークン(会議室)だけで検索する
+    # The old implementation let the 2-char token "AB" make the whole MATCH return 0 rows.
+    # The new implementation searches only with tokens of 3+ characters (会議室)
     results = db.keyword_search("AB 会議室", k=5)
     assert [r[0] for r in results] == ["room"]
 
@@ -248,7 +248,7 @@ def test_keyword_search_mixed_query_drops_short_tokens(db, embedder):
 def test_keyword_search_short_query_escapes_like_wildcards(db, embedder):
     _upsert(db, embedder, "pct", "進捗は95%です")
     _upsert(db, embedder, "other", "進捗は九割五分です")
-    # "%" が LIKE のワイルドカードとして解釈されないこと
+    # "%" must not be interpreted as a LIKE wildcard
     results = db.keyword_search("5%", k=5)
     assert [r[0] for r in results] == ["pct"]
 
@@ -313,7 +313,7 @@ def test_get_events_multiple_ids(db, embedder):
 
 
 # ---------------------------------------------------------------------------
-# add_link: weight 加算とクランプ
+# add_link: weight accumulation and clamping
 # ---------------------------------------------------------------------------
 
 def test_add_link_creates_new(db):

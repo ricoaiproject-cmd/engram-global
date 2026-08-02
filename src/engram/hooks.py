@@ -1,13 +1,13 @@
-"""エージェントのフックから呼ばれる入口(①自動符号化・②自発的想起)。
+"""Entry points invoked by agent hooks (1. automatic encoding, 2. spontaneous recall).
 
-Claude Code の hooks(~/.claude/settings.json)に登録され、stdin の JSON を
-受け取って動く:
+Registered in Claude Code's hooks (~/.claude/settings.json); receives JSON on
+stdin and acts on it:
 
-- SessionEnd        → run_session_end : セッションを episode として自動保存
-- UserPromptSubmit  → run_user_prompt : 関連記憶の自発的浮上(surface)
+- SessionEnd        -> run_session_end : auto-saves the session as an episode
+- UserPromptSubmit  -> run_user_prompt : spontaneous surfacing of related memories
 
-設計原則: フックは絶対にエージェントの動作を妨げない。
-あらゆる失敗を握りつぶして exit 0 で返し、経緯は ~/.engram/hooks.log に残す。
+Design principle: hooks must never block the agent. Every failure is swallowed
+and the hook exits 0; the details are left in ~/.engram/hooks.log.
 """
 
 from __future__ import annotations
@@ -22,19 +22,20 @@ from .config import Settings, get_settings, resolve_room
 
 _ENCODED_SESSIONS_KEEP = 500
 
-# 人間の発言ではない、エージェント/ハーネスが差し込むテキストの先頭部。
-# これらに自発的想起を反応させると、システム通知のたびに無関係な記憶が
-# 浮上してノイズになる(実ログで確認)。スラッシュコマンドも対象外。
+# Prefixes of text that is injected by the agent/harness rather than typed by
+# a human. If spontaneous recall reacted to these, unrelated memories would
+# surface on every system notification and become noise (confirmed against
+# real logs). Slash commands are excluded too.
 _NON_HUMAN_PREFIXES = (
-    "/",                       # スラッシュコマンド
-    "<",                       # <task-notification> / <command-name> / <!-- ... 等
-    "Caveat:",                 # ローカルコマンド実行時の注意書き
-    "[Request interrupted",    # 中断通知
+    "/",                       # Slash commands
+    "<",                       # <task-notification> / <command-name> / <!-- ... etc.
+    "Caveat:",                 # Notice shown when running a local command
+    "[Request interrupted",    # Interruption notice
 )
 
 
 def _is_non_human(text: str) -> bool:
-    """発言が人間由来でない(システム/ハーネスのテキスト)かを判定する。"""
+    """Determine whether an utterance did not originate from a human (system/harness text)."""
     return any(text.startswith(p) for p in _NON_HUMAN_PREFIXES)
 
 
@@ -50,12 +51,12 @@ def _log(settings: Settings, message: str) -> None:
 
 
 def _read_stdin_json(stdin_text: str | None) -> dict:
-    """stdin の JSON を読む。
+    """Read JSON from stdin.
 
-    フックの呼び出し元(Claude Code = Node)は UTF-8 で書き込むが、Windows の
-    Python はリダイレクトされた stdin を cp932 で解釈してしまい、日本語の
-    プロンプトやパス(例: マイドライブ)が壊れる(実機で発生)。テキスト層を
-    経由せず、バイト列を直接 UTF-8 デコードする。
+    The hook caller (Claude Code = Node) writes UTF-8, but on Windows, Python
+    interprets redirected stdin as cp932, which corrupts non-ASCII prompts
+    and paths (observed in the wild). Bypass the text layer entirely and
+    decode the raw bytes as UTF-8 directly.
     """
     if stdin_text is None:
         try:
@@ -74,7 +75,7 @@ def _read_stdin_json(stdin_text: str | None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# ① 自動符号化(SessionEnd)
+# 1. Automatic encoding (SessionEnd)
 # ---------------------------------------------------------------------------
 
 def _already_encoded(settings: Settings, session_id: str) -> bool:
@@ -104,12 +105,14 @@ def _mark_encoded(settings: Settings, session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 統合の自動促し(consolidation nudge)
+# Automatic consolidation nudge
 #
-# 要約は LLM(エージェント)にしかできないため、engram 自身は統合を実行できない。
-# 代わりに SessionEnd で候補クラスタ数を状態ファイルへ棚卸しし、次のセッションの
-# UserPromptSubmit(軽量経路)が閾値超過を検知したらエージェントに統合作業を促す。
-# 人間の「睡眠中の記憶整理」を、エージェントの手が空いた瞬間に移した設計。
+# Only an LLM (the agent) can produce a summary, so engram itself cannot
+# perform consolidation. Instead, SessionEnd tallies the candidate cluster
+# count into a state file, and the next session's UserPromptSubmit
+# (lightweight path) prompts the agent to do the consolidation work once the
+# threshold is exceeded. This moves the human notion of "memory
+# consolidation during sleep" to whenever the agent next has a free moment.
 # ---------------------------------------------------------------------------
 
 def _consolidation_state_path(settings: Settings) -> Path:
@@ -134,10 +137,11 @@ def _write_consolidation_state(settings: Settings, updates: dict) -> None:
 
 
 def _consolidation_nudge(settings: Settings, now: float | None = None) -> str | None:
-    """統合候補が溜まっていたら促し文を返す(エンジン不使用の軽量判定)。
+    """Return a nudge message if consolidation candidates have piled up (lightweight check, no engine).
 
-    促し過ぎはノイズなので、クラスタ数の閾値と促しの最短間隔の両方で絞る。
-    状態ファイルへの記録に失敗したときは促さない(毎プロンプト促す事故防止)。
+    Nudging too often is just noise, so this is gated both by a cluster-count
+    threshold and by a minimum interval between nudges. If writing to the
+    state file fails, don't nudge (to avoid nudging on every single prompt).
     """
     if not settings.consolidate_nudge:
         return None
@@ -154,28 +158,33 @@ def _consolidation_nudge(settings: Settings, now: float | None = None) -> str | 
     except OSError:
         return None
     return (
-        f"(engram 記憶整理) 統合候補の episode が {clusters} クラスタ溜まっています。"
-        "区切りの良いところで consolidation_candidates を呼び、クラスタごとに"
-        "内容を要約して remember(type=knowledge, 元クラスタの経緯を残す)で保存し、"
-        "mark_consolidated(episode_ids, new_memory_id) で元 episode を降格して"
-        "ください(人間の睡眠中の記憶整理に相当する保守作業です)。"
+        f"(engram memory consolidation) {clusters} clusters of consolidation-candidate "
+        "episodes have piled up. At a good stopping point, call "
+        "consolidation_candidates, summarize each cluster's content and save it with "
+        "remember (type=knowledge, preserving the source cluster's context), then "
+        "demote the original episodes with mark_consolidated(episode_ids, "
+        "new_memory_id). (This is maintenance work equivalent to memory "
+        "consolidation during human sleep.)"
     )
 
 
 # ---------------------------------------------------------------------------
-# スキル化候補の自動促し(skill nudge)
+# Automatic skill-candidate nudge
 #
-# consolidation nudge と完全に相似形の機構。同じ形の作業を記録した episode が
-# 一定件数(三度ルール)以上クラスタを成したら、手順として切り出す(スキル化)
-# 価値があるとみて、エージェントにユーザーへの提案を促す。状態ファイルは
-# consolidation と共用(consolidation_state.json)し、キーだけ分ける。
+# Structurally identical to the consolidation nudge. When episodes recording
+# the same shape of work form a cluster of at least a certain size (the
+# "three strikes" rule), it's judged worth extracting as a procedure (i.e.
+# turning it into a skill), and the agent is prompted to propose this to the
+# user. The state file is shared with consolidation (consolidation_state.json),
+# just under different keys.
 # ---------------------------------------------------------------------------
 
 def _skill_nudge(settings: Settings, now: float | None = None) -> str | None:
-    """スキル化候補が溜まっていたら促し文を返す(エンジン不使用の軽量判定)。
+    """Return a nudge message if skill candidates have piled up (lightweight check, no engine).
 
-    consolidate_nudge と同じゲート構造: 設定 off / クラスタ数が閾値未満 /
-    最短間隔未経過 / 状態ファイルへの書き込み失敗、のいずれかなら None。
+    Same gate structure as consolidate_nudge: returns None if the setting is
+    off, the cluster count is below threshold, the minimum interval hasn't
+    elapsed, or writing to the state file fails.
     """
     if not settings.skill_nudge:
         return None
@@ -192,18 +201,19 @@ def _skill_nudge(settings: Settings, now: float | None = None) -> str | None:
     except OSError:
         return None
     return (
-        f"(engram スキル化候補) 同じ形の作業を記録した episode が {clusters} "
-        f"クラスタ溜まっています(1クラスタ{settings.skill_min_count}件以上・"
-        "三度ルール)。区切りの良いところで skill_candidates を呼び、手順として"
-        "再利用できそうならスキル化(手順書の切り出し)をユーザーに提案してください。"
-        "勝手に作らず必ず承認を得ること。採用・見送りが決まったら、経緯を"
-        "remember(type=knowledge) で記録し、mark_consolidated(episode_ids, "
-        "new_memory_id) で元 episode を整理してください。"
+        f"(engram skill candidate) Episodes recording the same shape of work have "
+        f"formed {clusters} clusters (each with at least {settings.skill_min_count} "
+        "items - the three-strikes rule). At a good stopping point, call "
+        "skill_candidates, and if the procedure looks reusable, propose to the user "
+        "turning it into a skill (extracting it as a written procedure). Never create "
+        "one without asking first - always get approval. Once adopted or declined, "
+        "record the outcome with remember (type=knowledge), then clean up the "
+        "original episodes with mark_consolidated(episode_ids, new_memory_id)."
     )
 
 
 def run_session_end(stdin_text: str | None = None) -> int:
-    """SessionEnd フック本体。常に 0 を返す(セッション終了を妨げない)。"""
+    """SessionEnd hook body. Always returns 0 (never blocks session termination)."""
     try:
         settings = get_settings()
     except Exception:
@@ -218,10 +228,10 @@ def run_session_end(stdin_text: str | None = None) -> int:
         cwd = data.get("cwd", "")
 
         if not transcript_path or not Path(transcript_path).is_file():
-            _log(settings, f"session-end {session_id}: transcript なし、スキップ")
+            _log(settings, f"session-end {session_id}: no transcript, skipping")
             return 0
         if session_id != "unknown" and _already_encoded(settings, session_id):
-            _log(settings, f"session-end {session_id}: 符号化済み、スキップ")
+            _log(settings, f"session-end {session_id}: already encoded, skipping")
             return 0
 
         from .transcript import build_episode, extract_messages
@@ -235,13 +245,13 @@ def run_session_end(stdin_text: str | None = None) -> int:
             min_chars=settings.auto_encode_min_chars,
         )
         if episode is None:
-            _log(settings, f"session-end {session_id}: 中身が薄いため記録せず")
+            _log(settings, f"session-end {session_id}: content too thin, not recording")
             return 0
 
         room = resolve_room(cwd or messages.get("cwd"), settings.room_paths)
 
-        # ここで初めて重い依存(埋め込みモデル)をロードする。セッション終了後
-        # なのでユーザーの操作は妨げない
+        # Only load the heavy dependency (the embedding model) here. It's
+        # after session end, so this doesn't block the user's interaction.
         from .engine import build_engine
 
         engine = build_engine(settings)
@@ -253,8 +263,9 @@ def run_session_end(stdin_text: str | None = None) -> int:
             source="auto-encode",
             room=room,
         )
-        # 統合候補の棚卸し(エンジン構築済みなので追加コストは僅か)。
-        # 候補数を状態ファイルへ書き、次セッションの user-prompt が促す
+        # Tally consolidation candidates (the engine is already built, so
+        # this adds negligible cost). Write the count to the state file; the
+        # next session's user-prompt hook will nudge if it's over threshold.
         if settings.consolidate_nudge:
             try:
                 n_clusters = len(
@@ -265,10 +276,11 @@ def run_session_end(stdin_text: str | None = None) -> int:
                     {"clusters": n_clusters, "checked_at": time.time()},
                 )
             except Exception as e:
-                _log(settings, f"session-end 統合候補チェック失敗: {e!r}")
+                _log(settings, f"session-end consolidation candidate check failed: {e!r}")
 
-        # スキル化候補の棚卸し(consolidation と同じ理由で、ここでまとめて計算)。
-        # 候補数を状態ファイルへ書き、次セッションの user-prompt が促す
+        # Tally skill candidates (computed here for the same reason as
+        # consolidation). Write the count to the state file; the next
+        # session's user-prompt hook will nudge if it's over threshold.
         if settings.skill_nudge:
             try:
                 n_skill_clusters = len(
@@ -279,7 +291,7 @@ def run_session_end(stdin_text: str | None = None) -> int:
                     {"skill_clusters": n_skill_clusters, "checked_at": time.time()},
                 )
             except Exception as e:
-                _log(settings, f"session-end スキル候補チェック失敗: {e!r}")
+                _log(settings, f"session-end skill candidate check failed: {e!r}")
 
         engine.db.close()
         _mark_encoded(settings, session_id)
@@ -289,19 +301,20 @@ def run_session_end(stdin_text: str | None = None) -> int:
             f"id={result.get('id')} room={room}",
         )
     except Exception as e:
-        _log(settings, f"session-end エラー: {e!r}")
+        _log(settings, f"session-end error: {e!r}")
     return 0
 
 
 # ---------------------------------------------------------------------------
-# ② 自発的想起(UserPromptSubmit)
+# 2. Spontaneous recall (UserPromptSubmit)
 # ---------------------------------------------------------------------------
 
 def run_user_prompt(stdin_text: str | None = None) -> int:
-    """UserPromptSubmit フック本体。常に 0 を返す(プロンプトを妨げない)。
+    """UserPromptSubmit hook body. Always returns 0 (never blocks the prompt).
 
-    active モードでは hookSpecificOutput.additionalContext として浮上記憶を
-    出力し、エージェントの文脈に差し込まれる。shadow モードではログのみ。
+    In active mode, surfaced memories are emitted as
+    hookSpecificOutput.additionalContext and injected into the agent's
+    context. In shadow mode, only logging occurs.
     """
     try:
         settings = get_settings()
@@ -316,7 +329,7 @@ def run_user_prompt(stdin_text: str | None = None) -> int:
         stripped = prompt.strip()
         if len(stripped) < settings.surface_min_prompt_chars:
             return 0
-        if _is_non_human(stripped):  # システム/ハーネスのテキストは対象外
+        if _is_non_human(stripped):  # Skip system/harness text
             return 0
 
         context_parts: list[str] = []
@@ -336,12 +349,12 @@ def run_user_prompt(stdin_text: str | None = None) -> int:
             if settings.surface_mode == "active" and result.get("surfaced_items"):
                 context_parts.append(format_context(result["surfaced_items"]))
 
-        # 統合の促し(surface とは独立。consolidate_nudge 設定でゲート)
+        # Consolidation nudge (independent of surface; gated by consolidate_nudge setting)
         nudge = _consolidation_nudge(settings)
         if nudge:
             context_parts.append(nudge)
 
-        # スキル化候補の促し(consolidation とは独立。skill_nudge 設定でゲート)
+        # Skill-candidate nudge (independent of consolidation; gated by skill_nudge setting)
         skill_nudge = _skill_nudge(settings)
         if skill_nudge:
             context_parts.append(skill_nudge)
@@ -355,5 +368,5 @@ def run_user_prompt(stdin_text: str | None = None) -> int:
             }
             print(json.dumps(payload, ensure_ascii=False))
     except Exception as e:
-        _log(settings, f"user-prompt エラー: {e!r}")
+        _log(settings, f"user-prompt error: {e!r}")
     return 0
