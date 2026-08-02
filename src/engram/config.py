@@ -28,17 +28,17 @@ class Settings:
     )
     data_dir: Path = field(default_factory=_engram_home)
 
-    # --- Embedding (English edition default: all-MiniLM-L6-v2, mean pooling,
-    # no query/doc prefixes; prefix-style models such as E5 or Ruri can be
-    # configured via embed_model / query_prefix / doc_prefix) ---
-    embed_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # --- Embedding (default: multilingual-e5-small — 100+ languages,
+    # mean pooling, E5-style "query: "/"passage: " prefixes; other models
+    # can be configured via embed_model / query_prefix / doc_prefix) ---
+    embed_model: str = "intfloat/multilingual-e5-small"
     # Backend selection. "auto" uses ONNX (lightweight, 1-2s startup) once
     # export-onnx has produced a model, falling back to torch
     # (sentence-transformers, heavy import) if it hasn't been generated yet.
     # "onnx" / "torch" force one or the other. See embedder.make_embedder.
     embed_backend: str = "auto"          # "auto" | "onnx" | "torch"
-    query_prefix: str = ""
-    doc_prefix: str = ""
+    query_prefix: str = "query: "
+    doc_prefix: str = "passage: "
 
     # --- Re-rank weights (relevance dominates, to prevent a rich-get-richer
     # loop where activation alone drives ranking) ---

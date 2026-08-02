@@ -1,6 +1,6 @@
-"""Embedding layer. The default model is sentence-transformers/all-MiniLM-L6-v2;
-Ruri-v3 (local, Japanese-specialized) remains available via config. Tests use
-FakeEmbedder.
+"""Embedding layer. The default model is intfloat/multilingual-e5-small
+(100+ languages); other models such as Ruri-v3 (Japanese-specialized) remain
+available via config. Tests use FakeEmbedder.
 
 Two runtime backends:
 - OnnxRuriEmbedder — ONNX Runtime. Import+load is light (1-2s); this is the
@@ -51,10 +51,11 @@ def mean_pool_normalize(hidden: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 
 class RuriEmbedder:
-    """Wraps a sentence-transformers model (e.g. cl-nagoya/ruri-v3, or the
-    default all-MiniLM-L6-v2). Query/doc prefixes are configurable — the
-    Ruri family requires them (search query:/search document:), while the
-    default model uses empty prefixes.
+    """Wraps a sentence-transformers model (e.g. the default
+    multilingual-e5-small, or cl-nagoya/ruri-v3). Query/doc prefixes are
+    configurable — the E5 family uses "query: "/"passage: " (the defaults
+    here) and the Ruri family uses its own Japanese prefixes, while models
+    such as all-MiniLM use empty prefixes.
 
     sentence-transformers is heavy, so loading is lazy. The stdio MCP server
     is a long-lived process, so the model is only loaded once.
@@ -62,9 +63,9 @@ class RuriEmbedder:
 
     def __init__(
         self,
-        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
-        query_prefix: str = "",
-        doc_prefix: str = "",
+        model_name: str = "intfloat/multilingual-e5-small",
+        query_prefix: str = "query: ",
+        doc_prefix: str = "passage: ",
     ) -> None:
         self._model_name = model_name
         self._query_prefix = query_prefix
@@ -142,8 +143,8 @@ class OnnxRuriEmbedder:
     def __init__(
         self,
         model_dir: Path,
-        query_prefix: str = "",
-        doc_prefix: str = "",
+        query_prefix: str = "query: ",
+        doc_prefix: str = "passage: ",
     ) -> None:
         self._dir = Path(model_dir)
         self._query_prefix = query_prefix

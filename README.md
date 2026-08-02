@@ -6,11 +6,12 @@ Persistent memory shared by Claude Code, Codex, and Antigravity (Gemini CLI).
 The more a memory is used, the easier it is to recall; unused memories sink
 but never disappear — the same dynamics as human memory.
 
-This is the **English edition**: all documentation, setup wizard, CLI
-messages, and agent-facing instructions are in English, and the default
-embedding model is `sentence-transformers/all-MiniLM-L6-v2` (English-focused,
-~90 MB). A fully Japanese edition with a Japanese-focused embedding model
-(Ruri-v3) lives at
+This is the **international edition**: all documentation, the setup
+wizard, CLI messages, and agent-facing instructions are in English, and the
+default embedding model is `intfloat/multilingual-e5-small` (100+ languages,
+~470 MB download) — so your memories themselves can be written in English or
+almost any other language. A fully Japanese edition tuned for Japanese
+(Ruri-v3 embeddings) lives at
 [engram](https://github.com/ricoaiproject-cmd/engram).
 
 ---
@@ -72,7 +73,7 @@ engram setup
 The setup wizard automatically:
 - creates the config file (`~/.engram/config.toml`)
 - initializes the memory folder
-- downloads the embedding model (first run only, ~90 MB)
+- downloads the embedding model (first run only, ~470 MB)
 - registers engram with Claude Code / Codex / Antigravity
 - registers the hooks for auto-encoding and proactive recall (Claude Code)
 
@@ -146,10 +147,10 @@ retrieval models, `query_prefix` / `doc_prefix`) in `~/.engram/config.toml`,
 then rebuild the index:
 
 ```toml
-# Example: multilingual E5 (100+ languages, prefix-style)
-embed_model = "intfloat/multilingual-e5-small"
-query_prefix = "query: "
-doc_prefix = "passage: "
+# Example: a small English-only model (no prefixes)
+embed_model = "sentence-transformers/all-MiniLM-L6-v2"
+query_prefix = ""
+doc_prefix = ""
 ```
 
 ```powershell
@@ -537,7 +538,7 @@ uv tool uninstall engram
 
 # 6. To delete the data as well (memories, config, model cache)
 Remove-Item -Recurse -Force "$env:USERPROFILE\.engram"
-Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub\models--sentence-transformers--all-MiniLM*"
+Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\huggingface\hub\models--intfloat--multilingual-e5-small*"
 ```
 
 On macOS / Linux, steps 5–6 are:
@@ -545,5 +546,5 @@ On macOS / Linux, steps 5–6 are:
 ```bash
 uv tool uninstall engram
 rm -rf ~/.engram
-rm -rf ~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM*
+rm -rf ~/.cache/huggingface/hub/models--intfloat--multilingual-e5-small*
 ```

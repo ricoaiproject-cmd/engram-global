@@ -293,7 +293,7 @@ def update_claude_md(claude_md_path: Path, protocol_path: Path) -> tuple[bool, s
 # ---------------------------------------------------------------------------
 
 # Codex's default MCP initial-connection timeout (30s) isn't always enough
-# for engram to start up (loading the ~90MB embedding model + checking the
+# for engram to start up (loading the ~470MB embedding model + checking the
 # memory folder) (connection failures observed in practice). We avoid this
 # by explicitly setting a longer startup timeout at registration time.
 _CODEX_STARTUP_TIMEOUT_SEC = "120.0"
@@ -655,7 +655,7 @@ def setup_main(
     # Step 4: Fetch the embedding model
     # ------------------------------------------------------------------
     print("[4/6] Fetching the embedding model")
-    print("  Downloads roughly 90MB on first run (skipped if already cached)...")
+    print("  Downloads roughly 470MB on first run (skipped if already cached)...")
     embedder = None
     try:
         from .embedder import RuriEmbedder
@@ -1104,10 +1104,10 @@ def doctor_main(
         hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
     embed_cache = False
     if hf_cache.is_dir():
-        # Match the cache dir of the *configured* model (default: all-MiniLM-L6-v2)
+        # Match the cache dir of the *configured* model (default: multilingual-e5-small)
         embed_model = (
             settings.embed_model if settings
-            else "sentence-transformers/all-MiniLM-L6-v2"
+            else "intfloat/multilingual-e5-small"
         )
         model_prefix = "models--" + embed_model.replace("/", "--")
         embed_cache = any(
