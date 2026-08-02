@@ -1,11 +1,11 @@
 #!/bin/sh
 # engram installer for macOS / Linux
-# Usage: curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram/main/install.sh | sh
+# Usage: curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram-global/main/install.sh | sh
 #        or: ./install.sh
 #        or: ./install.sh /path/to/local/engram
 set -e
 
-SOURCE="${1:-git+https://github.com/ricoaiproject-cmd/engram.git}"
+SOURCE="${1:-git+https://github.com/ricoaiproject-cmd/engram-global.git}"
 
 echo ""
 echo "========================================"

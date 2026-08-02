@@ -6,7 +6,7 @@
 # Compatible with Windows PowerShell 5.1
 
 param(
-    [string]$Source = "git+https://github.com/ricoaiproject-cmd/engram.git"
+    [string]$Source = "git+https://github.com/ricoaiproject-cmd/engram-global.git"
 )
 
 $ErrorActionPreference = "Stop"
