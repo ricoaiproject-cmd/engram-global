@@ -161,9 +161,12 @@ engram export-onnx   # optional: regenerate the ONNX fast path
 Note: the built-in mean pooling matches models such as MiniLM, E5, and
 Ruri; CLS-pooling models (e.g. bge) are not supported by the ONNX path.
 
-### Faster startup with ONNX (new in v0.6)
+### Faster startup with ONNX
 
-Run this once:
+Since v0.11, `engram setup` (which the one-line installer runs for you)
+exports the model to ONNX automatically, so **no manual step is needed** —
+it is skipped when already exported (idempotent). Use the manual command
+only when you want to re-export, e.g. after switching embedding models:
 
 ```powershell
 engram export-onnx
@@ -514,8 +517,11 @@ macOS / Linux:
 curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram-global/main/install.sh | sh
 ```
 
-`uv tool upgrade engram` does the same.
+`uv tool upgrade engram` does the same (package update only).
 
+- The one-line installer also re-runs setup afterwards, so environments
+  that never exported the ONNX model get converted automatically and
+  startup drops to ~2 s (skipped when already exported)
 - Your memories and config (`~/.engram` and the memories folder) are kept — nothing is deleted
 - After updating, restart each agent that uses engram (Claude Code, etc.) so the MCP server reconnects
 

@@ -799,3 +799,82 @@ class TestSummarizePerf:
         log.write_text("garbage\nmore garbage\n", encoding="utf-8")
         status, detail = summarize_perf(log)
         assert status == "[--]"
+
+
+# ---------------------------------------------------------------------------
+# Automatic ONNX export inside setup_main (Step 4)
+# ---------------------------------------------------------------------------
+
+class TestSetupMainOnnxExport:
+    """Branches of the automatic ONNX export: run when missing, skip when
+    already exported, and keep going when the conversion fails."""
+
+    class _FakeEmbedder:
+        dim = 8
+
+        def embed_query(self, text):
+            import numpy as np
+            return np.zeros(8, dtype=np.float32)
+
+        def embed_docs(self, texts):
+            import numpy as np
+            return np.zeros((len(texts), 8), dtype=np.float32)
+
+    def _run(self, tmp_path, monkeypatch, *, ready, export_raises=False):
+        import engram.setup as setup_mod
+        import engram.embedder as emb_mod
+        import engram.config as cfg_mod
+        import engram.onnx_export as onnx_mod
+
+        monkeypatch.setenv("ENGRAM_HOME", str(tmp_path / "engram_home"))
+        monkeypatch.setattr(setup_mod.shutil, "which", lambda *a, **kw: None)
+        mcp = tmp_path / "engram-mcp.exe"
+        mcp.write_bytes(b"")
+        monkeypatch.setattr(setup_mod, "get_engram_mcp_path", lambda: mcp)
+        monkeypatch.setattr(emb_mod, "RuriEmbedder", lambda: self._FakeEmbedder())
+        monkeypatch.setattr(cfg_mod, "onnx_model_ready", lambda d: ready)
+
+        calls = []
+
+        def fake_export(settings, **kw):
+            calls.append(settings)
+            if export_raises:
+                raise RuntimeError("conversion failed")
+            return {"ok": True}
+
+        monkeypatch.setattr(onnx_mod, "export_onnx", fake_export)
+
+        engram_home = tmp_path / "engram_home"
+        engram_home.mkdir(parents=True, exist_ok=True)
+        codex_dir = tmp_path / "codex"
+        codex_dir.mkdir()
+        gemini_dir = tmp_path / "gemini"
+        (gemini_dir / "config").mkdir(parents=True)
+        setup_main(
+            memories_dir=tmp_path / "memories",
+            non_interactive=True,
+            agents={"codex"},
+            engram_home=engram_home,
+            config_file=engram_home / "config.toml",
+            claude_md_path=tmp_path / "claude_md" / "CLAUDE.md",
+            codex_dir=codex_dir,
+            gemini_dir=gemini_dir,
+        )
+        return calls
+
+    def test_exports_when_missing(self, tmp_path, monkeypatch, capsys):
+        calls = self._run(tmp_path, monkeypatch, ready=False)
+        assert len(calls) == 1
+        assert "ONNX export complete" in capsys.readouterr().out
+
+    def test_skips_when_already_exported(self, tmp_path, monkeypatch, capsys):
+        calls = self._run(tmp_path, monkeypatch, ready=True)
+        assert calls == []
+        assert "already exported (skipped)" in capsys.readouterr().out
+
+    def test_failure_does_not_abort_setup(self, tmp_path, monkeypatch, capsys):
+        calls = self._run(tmp_path, monkeypatch, ready=False, export_raises=True)
+        out = capsys.readouterr().out
+        assert len(calls) == 1
+        assert "Warning: ONNX export failed" in out
+        assert "[6/6]" in out

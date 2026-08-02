@@ -667,6 +667,27 @@ def setup_main(
         results.append(("Embedding model fetch", False, str(e)))
         print(f"  Warning: failed to fetch the model ({e})")
         print("  This will be retried the first time the server starts.")
+
+    # ONNX export (first run only, idempotent). Removes the need to run
+    # `engram export-onnx` by hand. Not attempted when the model fetch
+    # failed (embedder is None).
+    if embedder is not None:
+        try:
+            from .config import onnx_model_ready
+            settings = get_settings()
+            if onnx_model_ready(settings.onnx_model_dir):
+                results.append(("ONNX export", True, "already exported (skipped)"))
+                print("  ONNX export: already exported (skipped)")
+            else:
+                print("  Converting the model to ONNX for fast startup (first run only, takes a few minutes)...")
+                from .onnx_export import export_onnx
+                export_onnx(settings)
+                results.append(("ONNX export", True, "complete"))
+                print("  ONNX export complete (startup will now take ~2 s)")
+        except Exception as e:
+            results.append(("ONNX export", False, str(e)))
+            print(f"  Warning: ONNX export failed ({e})")
+            print("  engram still works without it (if startup feels slow, run engram export-onnx later)")
     print()
 
     # ------------------------------------------------------------------

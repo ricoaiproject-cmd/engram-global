@@ -1,6 +1,6 @@
 [project]
 name = "engram"
-version = "0.10.0"
+version = "0.11.0"
 description = "Human-like memory MCP server for AI agents: activation decay, associative recall, error-driven encoding"
 requires-python = ">=3.12"
 # To reduce install friction, the embedding runtimes are default dependencies.
