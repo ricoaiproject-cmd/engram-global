@@ -1,4 +1,4 @@
-[日本語版 → engram-ja](https://github.com/ricoaiproject-cmd/engram-ja)
+[日本語版 → engram](https://github.com/ricoaiproject-cmd/engram)
 
 # engram — Human-like memory for AI agents (MCP server)
 
@@ -11,7 +11,7 @@ messages, and agent-facing instructions are in English, and the default
 embedding model is `sentence-transformers/all-MiniLM-L6-v2` (English-focused,
 ~90 MB). A fully Japanese edition with a Japanese-focused embedding model
 (Ruri-v3) lives at
-[engram-ja](https://github.com/ricoaiproject-cmd/engram-ja).
+[engram](https://github.com/ricoaiproject-cmd/engram).
 
 ---
 
