@@ -23,13 +23,13 @@ almost any other language. A fully Japanese edition tuned for Japanese
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram-en/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram-global/main/install.ps1 | iex
 ```
 
 macOS / Linux:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram-en/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram-global/main/install.sh | sh
 ```
 
 This single line installs uv, installs engram, and runs the setup wizard.
@@ -45,7 +45,7 @@ Windows (PowerShell):
 irm https://astral.sh/uv/install.ps1 | iex
 
 # 2. Install engram
-uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram-en.git
+uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram-global.git
 
 # 3. Run the setup wizard
 engram setup
@@ -58,7 +58,7 @@ macOS / Linux:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 2. Install engram (force a uv-managed Python — see note below)
-UV_PYTHON_PREFERENCE=only-managed uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram-en.git
+UV_PYTHON_PREFERENCE=only-managed uv tool install --python 3.12 git+https://github.com/ricoaiproject-cmd/engram-global.git
 
 # 3. Run the setup wizard
 engram setup
@@ -505,13 +505,13 @@ Then fully restart Codex (quit and relaunch, not just close the window).
 Re-run the same one-line installer to overwrite with the latest version:
 
 ```powershell
-irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram-en/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/ricoaiproject-cmd/engram-global/main/install.ps1 | iex
 ```
 
 macOS / Linux:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram-en/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/ricoaiproject-cmd/engram-global/main/install.sh | sh
 ```
 
 `uv tool upgrade engram` does the same.
