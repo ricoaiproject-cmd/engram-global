@@ -154,7 +154,7 @@ class Settings:
     auto_encode_min_chars: int = 16      # skip recording a session whose total user text is below this length
 
     # --- Spontaneous recall (surface) ---
-    surface_mode: str = "shadow"         # off | shadow (log only) | active (inject into context)
+    surface_mode: str = "active"         # off | shadow (log only) | active (inject into context)
     surface_threshold: float = 0.45      # only memories scoring at or above this surface
     # Minimum relevance gate. No matter how high activation or importance
     # are, a memory whose lexical relevance to the utterance falls below

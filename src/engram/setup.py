@@ -614,10 +614,10 @@ def setup_main(
         print(f"  memories_dir: {chosen_dir}")
         results.append(("Config file creation", True, str(cfg_path)))
 
-    # Explicitly set the spontaneous-recall mode (default: shadow = log-only, observe first)
+    # Explicitly set the spontaneous-recall mode (default: active = inject related memories)
     if "surface_mode" not in read_config_toml(cfg_path):
-        merge_config_toml(cfg_path, {"surface_mode": "shadow"})
-        print("  surface_mode: shadow (spontaneous recall starts in log-only observation mode)")
+        merge_config_toml(cfg_path, {"surface_mode": "active"})
+        print("  surface_mode: active (related memories are injected into context; set to shadow for log-only)")
 
     chosen_dir = Path(existing_cfg.get("memories_dir", chosen_dir)).expanduser().resolve() \
         if "memories_dir" in existing_cfg and memories_dir is None else chosen_dir.expanduser().resolve()
@@ -771,7 +771,7 @@ def setup_main(
                 results.append(("Claude Code hook registration", ok3, msg3))
                 print(f"  Claude Code hook registration: {msg3}")
                 print("    - Automatic memory on session end (SessionEnd)")
-                print("    - Spontaneous recall of related memories (UserPromptSubmit, shadow mode initially)")
+                print("    - Spontaneous recall of related memories (UserPromptSubmit)")
             else:
                 results.append(("Claude Code hook registration", False, "engram CLI not found"))
                 print("  Claude Code hook registration: engram CLI not found")

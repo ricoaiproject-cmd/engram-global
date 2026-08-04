@@ -227,13 +227,13 @@ by `surface_mode` in `config.toml`:
 
 | Mode | Behavior |
 |---|---|
-| `shadow` (default) | Injects nothing; logs "this is what I would have surfaced" (for observation and tuning) |
-| `active` | Actually injects strongly related memories into the agent's context |
+| `active` (default) | Actually injects strongly related memories into the agent's context |
+| `shadow` | Injects nothing; logs "this is what I would have surfaced" (for observation and tuning) |
 | `off` | Does nothing |
 
-The log lives at `~/.engram/surface/surface_log.jsonl`. We recommend watching
-shadow mode for a while and switching to `active` once the surfaced candidates
-look right. Use `engram surface "some text"` to check manually what would
+The log lives at `~/.engram/surface/surface_log.jsonl`. If unrelated memories
+keep surfacing, raise `surface_min_relevance` or switch to `shadow` to observe
+via the log only. Use `engram surface "some text"` to check manually what would
 surface.
 
 Tuning parameters: `surface_threshold` (score threshold, default 0.45) /
