@@ -7,4 +7,4 @@ A memory model that separates meaning (embedding) from recallability (activation
 - A corrected error is re-encoded at high activation, mistake and all, as its own experience
 """
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"

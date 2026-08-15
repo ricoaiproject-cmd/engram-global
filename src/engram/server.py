@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -39,6 +40,16 @@ _engine_lock = threading.Lock()
 # The server's default room. Determined at process startup from the working
 # directory (= the project the agent was launched from) via config's room_paths
 _room: str | None = None
+
+# When a tool was last called (or the model finished preloading). Used by the
+# idle-unload check. Float assignment is atomic in CPython, so no lock needed
+_last_activity: float = time.monotonic()
+
+
+def _touch() -> None:
+    """Reset the idle-unload timer (on tool calls and preload completion)."""
+    global _last_activity
+    _last_activity = time.monotonic()
 
 
 def _get_engine() -> MemoryEngine:
@@ -60,7 +71,9 @@ def _timed(name: str):
     than wrapping the tool function itself in a decorator, use
     `with _timed(...):` inside each tool's body (this never touches the
     function's signature or docstring).
+    Every tool passes through here, so this also resets the idle-unload timer.
     """
+    _touch()
     return perf.timed(_get_engine().settings, "tool", name)
 
 
@@ -375,6 +388,10 @@ def _preload() -> None:
     try:
         engine = _get_engine()
         engine.embedder.embed_query("warm-up")
+        # Start counting idle time from preload completion (a process whose
+        # tools are never called gets its model unloaded after idle_sec —
+        # which is exactly the point)
+        _touch()
         print("engram: engine preloaded", file=sys.stderr)
     except Exception as e:  # keep starting up even on failure; retry lazily on the first tool call
         ok = False
@@ -386,6 +403,92 @@ def _preload() -> None:
                 settings,
                 {"ts": time.time(), "kind": "preload", "name": "preload", "ms": ms, "ok": ok},
             )
+
+
+def _resolve_idle_unload_sec(raw: str | None) -> float:
+    """Resolve the ENGRAM_IDLE_UNLOAD_SEC value (pure function, covered by tests).
+
+    Defaults to 600 seconds (10 minutes). 0 or less disables idle unload.
+    Non-numeric values fall back to the default.
+    """
+    default = 600.0
+    if raw is None or not raw.strip():
+        return default
+    try:
+        sec = float(raw.strip())
+    except ValueError:
+        return default
+    return max(0.0, sec)
+
+
+def _maybe_idle_unload(idle_sec: float) -> bool:
+    """One round of the idle check. Returns True if the model was released
+    (covered by tests).
+
+    Only embedders that expose unload() (= the ONNX path) are eligible. The
+    torch path is excluded because reloading it hits the 3-minute-class
+    Windows pathology (see the comment in main()). If the engine hasn't been
+    built (no model loaded), do nothing — building an engine just to unload
+    it would defeat the purpose.
+    """
+    import gc
+    import sys
+
+    engine = _engine  # not _get_engine() (that would trigger construction)
+    if engine is None:
+        return False
+    embedder = engine.embedder
+    unload = getattr(embedder, "unload", None)
+    if unload is None or not getattr(embedder, "loaded", False):
+        return False
+    idle = time.monotonic() - _last_activity
+    if idle < idle_sec:
+        return False
+    if not unload():
+        return False
+    gc.collect()  # make ORT return its session arena promptly
+    print(
+        f"engram: idle {int(idle)}s >= {int(idle_sec)}s, "
+        "embedding model unloaded (reloads on next tool call)",
+        file=sys.stderr,
+    )
+    try:
+        if engine.settings.perf_log:
+            perf.append_perf(
+                engine.settings,
+                {
+                    "ts": time.time(),
+                    "kind": "unload",
+                    "name": "idle_unload",
+                    "ms": idle * 1000.0,
+                    "ok": True,
+                },
+            )
+    except Exception:
+        pass  # recording is best-effort
+    return True
+
+
+def _idle_unload_loop(idle_sec: float) -> None:
+    """Daemon loop that releases the embedding model when idle.
+
+    Background: a stdio MCP server is a resident process. Clients like Codex
+    spawn one MCP process per execution host and leave them running, so the
+    ~1.1 GB ONNX model piles up once per process (observed: four processes at
+    once with Codex Desktop 26.810, dropping a 16 GB PC to ~1 GB of free
+    RAM). ENGRAM_PRELOAD=off covers "don't load until used"; this loop covers
+    the other half — "give it back when done".
+    """
+    # Wake up more often than idle_sec (at most every 60s). Worst-case release
+    # happens idle_sec + interval after the last call
+    interval = min(60.0, max(1.0, idle_sec / 4))
+    while True:
+        time.sleep(interval)
+        try:
+            _maybe_idle_unload(idle_sec)
+        except Exception:
+            # Unloading is best-effort; never take down the server itself
+            continue
 
 
 def _resolve_preload_mode(raw: str | None, onnx_ready: bool) -> str:
@@ -477,6 +580,18 @@ def main() -> None:
     elif mode == "background":
         threading.Thread(
             target=_preload, name="engram-preload", daemon=True
+        ).start()
+
+    # Release the embedding model after ENGRAM_IDLE_UNLOAD_SEC seconds
+    # (default 600) without a tool call; 0 or less disables. See the
+    # _idle_unload_loop docstring for details
+    idle_sec = _resolve_idle_unload_sec(os.environ.get("ENGRAM_IDLE_UNLOAD_SEC"))
+    if idle_sec > 0:
+        threading.Thread(
+            target=_idle_unload_loop,
+            args=(idle_sec,),
+            name="engram-idle-unload",
+            daemon=True,
         ).start()
 
     mcp.run()

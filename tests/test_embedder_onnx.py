@@ -124,7 +124,7 @@ class TestMakeEmbedder:
         _fabricate_onnx_dir(s)
         emb = make_embedder(s)
         assert emb.dim == 512
-        assert emb._session is None  # session remains unloaded
+        assert not emb.loaded  # session remains unloaded
 
     def test_backend_onnx_forced_missing_dir_raises(self, tmp_path):
         s = _make_settings(tmp_path, "onnx")
@@ -153,6 +153,76 @@ class TestMakeEmbedder:
         # no meta.json
         emb = make_embedder(s)
         assert isinstance(emb, RuriEmbedder)
+
+
+# ---------------------------------------------------------------------------
+# Idle unload — guards against the Codex multi-process memory pile-up (v0.12.0)
+# ---------------------------------------------------------------------------
+
+class TestOnnxUnload:
+    def _loaded_embedder(self, tmp_path) -> OnnxRuriEmbedder:
+        """An embedder faked into the loaded state (no real model involved)."""
+        s = _make_settings(tmp_path, "auto")
+        _fabricate_onnx_dir(s)
+        emb = make_embedder(s)
+        emb._parts = (object(), object(), ["input_ids"])  # pseudo-loaded state
+        return emb
+
+    def test_unload_releases_and_reports(self, tmp_path):
+        emb = self._loaded_embedder(tmp_path)
+        assert emb.loaded
+        assert emb.unload() is True  # something was released
+        assert not emb.loaded
+
+    def test_unload_when_not_loaded_is_noop(self, tmp_path):
+        s = _make_settings(tmp_path, "auto")
+        _fabricate_onnx_dir(s)
+        emb = make_embedder(s)
+        assert not emb.loaded
+        assert emb.unload() is False  # nothing to release
+
+    def test_unload_then_reload_on_next_use(self, tmp_path):
+        """After unload, the next use attempts a reload (the model is an empty
+        file, so the load fails with an exception — which is sufficient proof
+        that a load was attempted)."""
+        import pytest
+
+        emb = self._loaded_embedder(tmp_path)
+        emb.unload()
+        with pytest.raises(Exception):
+            emb.embed_query("trigger a reload")
+
+    def test_encode_holds_local_refs_against_unload(self, tmp_path):
+        """_encode copies the loaded parts into local variables, so it finishes
+        safely on its own references even if unload() races with it."""
+
+        class FakeTokenizer:
+            def encode_batch(self, texts):
+                class E:
+                    ids = [1, 2]
+                    attention_mask = [1, 1]
+
+                return [E() for _ in texts]
+
+        class FakeSession:
+            def run(self, _out, feeds):
+                batch = len(feeds["input_ids"])
+                return [np.ones((batch, 2, 4), dtype=np.float32)]
+
+        emb = self._loaded_embedder(tmp_path)
+        emb._parts = (FakeSession(), FakeTokenizer(), ["input_ids", "attention_mask"])
+
+        original_load = emb._load
+
+        def load_then_unload():
+            parts = original_load()
+            emb.unload()  # reproduce an unload arriving right after the load
+            return parts
+
+        emb._load = load_then_unload
+        vecs = emb.embed_docs(["a", "b"])  # must finish without an exception
+        assert vecs.shape == (2, 4)
+        assert not emb.loaded
 
 
 # ---------------------------------------------------------------------------

@@ -208,6 +208,27 @@ MCP startup timeout (for Claude Code: `MCP_TIMEOUT=120000`) or run
 `engram export-onnx`, rather than forcing `background` — on torch that only
 converts a visible startup timeout into a 3-minute first `recall`.
 
+### Multiple processes and memory (`ENGRAM_IDLE_UNLOAD_SEC`) (v0.12.0+)
+
+MCP clients do not necessarily start **just one** engram process. Seen in the
+wild: Codex Desktop (26.810) spawns one stdio MCP process per execution host
+and leaves them running afterwards, so the ~1.1 GB ONNX model piles up once
+per process — on a 16 GB-class PC free RAM runs out and the whole machine
+starts stuttering (four simultaneous processes observed on a real machine).
+v0.12.0 adds a two-part defense:
+
+1. **Preload suppression at Codex registration** — `engram setup` writes
+   `ENGRAM_PRELOAD = "off"` into the engram block of `~/.codex/config.toml`
+   (existing users get it appended just by re-running setup; a manually set
+   value is left untouched). Processes that never use a tool no longer load
+   the model at all.
+2. **Idle unload** — if no tool is called for `ENGRAM_IDLE_UNLOAD_SEC` seconds
+   (default 600 = 10 minutes), the model is released from memory. Even when a
+   process that did use tools lingers, the memory comes back later. The model
+   reloads automatically on the next tool call (a few seconds on ONNX) and no
+   memories are lost. Set `0` to disable. ONNX path only (the torch path is
+   excluded because of its slow-reload pathology).
+
 ---
 
 ## More like real memory (new in v0.3)

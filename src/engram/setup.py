@@ -298,6 +298,16 @@ def update_claude_md(claude_md_path: Path, protocol_path: Path) -> tuple[bool, s
 # by explicitly setting a longer startup timeout at registration time.
 _CODEX_STARTUP_TIMEOUT_SEC = "120.0"
 
+# Codex spawns one stdio MCP process per execution host (conversation /
+# code-mode run) and can leave them running afterwards (observed: four
+# processes at once with Codex Desktop 26.810). With the default for
+# ONNX-ready environments (ENGRAM_PRELOAD=auto -> background), every one of
+# those processes preloads the ~1.1 GB model and exhausts the RAM of a
+# 16 GB-class PC. For Codex specifically, make "don't load until used"
+# explicit at registration time (only processes that actually call a tool
+# load the model lazily; the memory features are unaffected).
+_CODEX_PRELOAD_LINE = 'ENGRAM_PRELOAD = "off"'
+
 
 def register_codex(
     codex_config_path: Path,
@@ -305,9 +315,10 @@ def register_codex(
 ) -> tuple[bool, str]:
     """Append the engram MCP block to ~/.codex/config.toml. Idempotent.
 
-    If the registered block is missing startup_timeout_sec, it gets appended
-    (so users who registered with an older version can fix it just by
-    re-running setup).
+    If the registered block is missing startup_timeout_sec or the env table's
+    ENGRAM_PRELOAD, they get appended (so users who registered with an older
+    version can fix it just by re-running setup). If the user has set
+    ENGRAM_PRELOAD manually, their value is left untouched.
     """
     try:
         import re
@@ -353,6 +364,28 @@ def register_codex(
                     updated,
                 )
                 actions.append("added startup timeout")
+            # The env sub-table's ENGRAM_PRELOAD (guards against the
+            # multi-process model pile-up). If the user set a value manually,
+            # respect it and leave it alone
+            env_block = re.search(
+                r"\[mcp_servers\.engram\.env\]\r?\n(?:(?!\[).*\r?\n?)*", updated
+            )
+            if env_block is None:
+                # Append the whole env table at the end (TOML doesn't care
+                # about table order)
+                if not updated.endswith("\n"):
+                    updated += "\n"
+                updated += (
+                    f"\n[mcp_servers.engram.env]\n{_CODEX_PRELOAD_LINE}\n"
+                )
+                actions.append("added preload suppression")
+            elif "ENGRAM_PRELOAD" not in env_block.group(0):
+                updated = re.sub(
+                    r"(\[mcp_servers\.engram\.env\]\r?\n)",
+                    lambda mm: f"{mm.group(1)}{_CODEX_PRELOAD_LINE}\n",
+                    updated,
+                )
+                actions.append("added preload suppression")
             if not actions:
                 return True, "already appended (skipped)"
             codex_config_path.write_text(updated, encoding="utf-8")
@@ -361,6 +394,8 @@ def register_codex(
             f"\n[mcp_servers.engram]\n"
             f"command = '{mcp_path_str}'\n"
             f"startup_timeout_sec = {_CODEX_STARTUP_TIMEOUT_SEC}\n"
+            f"\n[mcp_servers.engram.env]\n"
+            f"{_CODEX_PRELOAD_LINE}\n"
         )
         with codex_config_path.open("a", encoding="utf-8") as f:
             f.write(addition)

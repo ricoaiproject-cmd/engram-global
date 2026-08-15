@@ -323,9 +323,19 @@ class TestCodexConfig:
         assert "[mcp_servers.engram]" in content
         # Must always be set explicitly, since the default 30 seconds can be too short for startup
         assert "startup_timeout_sec = 120.0" in content
+        # Codex spawns one MCP process per execution host and leaves them
+        # running, so preloading must be suppressed for every process
+        assert "[mcp_servers.engram.env]" in content
+        assert 'ENGRAM_PRELOAD = "off"' in content
+        # The written TOML is syntactically valid
+        import tomllib
+
+        parsed = tomllib.loads(content)
+        assert parsed["mcp_servers"]["engram"]["env"]["ENGRAM_PRELOAD"] == "off"
 
     def test_idempotent_if_already_registered(self, tmp_path):
-        """Skip if already registered with the same path (with the startup timeout also already set)."""
+        """Skip if already registered with the same path (with the startup
+        timeout and preload suppression also already set)."""
         fake_mcp = tmp_path / "engram-mcp.exe"
         fake_mcp.write_bytes(b"")
         same_path = str(fake_mcp).replace("\\", "/")
@@ -333,7 +343,8 @@ class TestCodexConfig:
         codex_cfg.parent.mkdir(parents=True, exist_ok=True)
         codex_cfg.write_text(
             f"[mcp_servers.engram]\ncommand = '{same_path}'\n"
-            f"startup_timeout_sec = 120.0\n",
+            f"startup_timeout_sec = 120.0\n"
+            f"\n[mcp_servers.engram.env]\nENGRAM_PRELOAD = \"off\"\n",
             encoding="utf-8",
         )
 
@@ -344,6 +355,21 @@ class TestCodexConfig:
         # No duplicate entry was added
         assert content.count("[mcp_servers.engram]") == 1
         assert content.count("startup_timeout_sec") == 1
+        assert content.count("ENGRAM_PRELOAD") == 1
+
+    def test_register_twice_converges(self, tmp_path):
+        """Fresh registration -> re-run: the second run skips and the content
+        stays identical (convergence)."""
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+
+        ok1, _ = register_codex(codex_cfg, fake_mcp)
+        first = codex_cfg.read_text(encoding="utf-8")
+        ok2, msg2 = register_codex(codex_cfg, fake_mcp)
+        assert ok1 and ok2
+        assert "skipped" in msg2
+        assert codex_cfg.read_text(encoding="utf-8") == first
 
     def test_timeout_added_to_legacy_entry(self, tmp_path):
         """Appends to a block that was registered by an older version (without a startup timeout).
@@ -438,6 +464,87 @@ class TestCodexConfig:
         ok, _ = register_codex(codex_cfg, fake_mcp)
         assert ok
         assert codex_cfg.is_file()
+
+    def test_preload_added_to_legacy_entry(self, tmp_path):
+        """Appends to a block registered by an older version (no env table).
+        Observed in practice: Codex Desktop 26.810 spawned one MCP process per
+        execution host and left them running; each preloaded the ~1.1 GB model
+        and free RAM on a 16 GB PC dropped to about 1 GB."""
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+        same_path = str(fake_mcp).replace("\\", "/")
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        codex_cfg.parent.mkdir(parents=True, exist_ok=True)
+        codex_cfg.write_text(
+            f"[mcp_servers.engram]\ncommand = '{same_path}'\n"
+            f"startup_timeout_sec = 120.0\n"
+            f"\n[mcp_servers.engram.tools.recall]\napproval_mode = 'auto'\n",
+            encoding="utf-8",
+        )
+
+        ok, msg = register_codex(codex_cfg, fake_mcp)
+        assert ok
+        assert "preload suppression" in msg
+        content = codex_cfg.read_text(encoding="utf-8")
+        import tomllib
+
+        parsed = tomllib.loads(content)
+        assert parsed["mcp_servers"]["engram"]["env"]["ENGRAM_PRELOAD"] == "off"
+        # Other settings, such as the tools subsection, are untouched
+        assert parsed["mcp_servers"]["engram"]["tools"]["recall"][
+            "approval_mode"
+        ] == "auto"
+
+    def test_preload_line_added_into_existing_env_block(self, tmp_path):
+        """If an env table already exists (with other variables), the line is
+        added inside it. The table must not be duplicated."""
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+        same_path = str(fake_mcp).replace("\\", "/")
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        codex_cfg.parent.mkdir(parents=True, exist_ok=True)
+        codex_cfg.write_text(
+            f"[mcp_servers.engram]\ncommand = '{same_path}'\n"
+            f"startup_timeout_sec = 120.0\n"
+            f"\n[mcp_servers.engram.env]\nSOME_VAR = \"x\"\n",
+            encoding="utf-8",
+        )
+
+        ok, msg = register_codex(codex_cfg, fake_mcp)
+        assert ok
+        assert "preload suppression" in msg
+        content = codex_cfg.read_text(encoding="utf-8")
+        assert content.count("[mcp_servers.engram.env]") == 1
+        import tomllib
+
+        parsed = tomllib.loads(content)
+        env = parsed["mcp_servers"]["engram"]["env"]
+        assert env["ENGRAM_PRELOAD"] == "off"
+        assert env["SOME_VAR"] == "x"  # Existing variables are untouched
+
+    def test_manual_preload_value_is_respected(self, tmp_path):
+        """If the user set ENGRAM_PRELOAD manually (even to a value other than
+        off), leave it alone. The user owns their settings."""
+        fake_mcp = tmp_path / "engram-mcp.exe"
+        fake_mcp.write_bytes(b"")
+        same_path = str(fake_mcp).replace("\\", "/")
+        codex_cfg = tmp_path / ".codex" / "config.toml"
+        codex_cfg.parent.mkdir(parents=True, exist_ok=True)
+        codex_cfg.write_text(
+            f"[mcp_servers.engram]\ncommand = '{same_path}'\n"
+            f"startup_timeout_sec = 120.0\n"
+            f"\n[mcp_servers.engram.env]\n"
+            f"# manually tuned\n"
+            f"ENGRAM_PRELOAD = \"background\"\n",
+            encoding="utf-8",
+        )
+
+        ok, msg = register_codex(codex_cfg, fake_mcp)
+        assert ok
+        assert "skipped" in msg
+        content = codex_cfg.read_text(encoding="utf-8")
+        assert 'ENGRAM_PRELOAD = "background"' in content  # Value untouched
+        assert content.count("ENGRAM_PRELOAD") == 1
 
 
 # ---------------------------------------------------------------------------

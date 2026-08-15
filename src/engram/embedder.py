@@ -149,9 +149,10 @@ class OnnxRuriEmbedder:
         self._dir = Path(model_dir)
         self._query_prefix = query_prefix
         self._doc_prefix = doc_prefix
-        self._session = None
-        self._tokenizer = None
-        self._input_names: list[str] = []
+        # (session, tokenizer, input_names) held as a single tuple. Even if
+        # unload() races with a running _encode, _encode copies the loaded
+        # parts into locals first, so it finishes safely on its own references
+        self._parts: tuple | None = None
         self._meta: dict | None = None
         self._lock = threading.Lock()
 
@@ -173,11 +174,18 @@ class OnnxRuriEmbedder:
     def dim(self) -> int:
         return int(self._load_meta()["dim"])
 
-    def _load(self):
-        if self._session is not None:
-            return self._session
+    def _load(self) -> tuple:
+        """Return (session, tokenizer, input_names).
+
+        Callers must copy the returned tuple into local variables before use.
+        Reading the attributes off `self` directly would hit None the moment
+        another thread calls unload().
+        """
+        parts = self._parts
+        if parts is not None:
+            return parts
         with self._lock:
-            if self._session is None:
+            if self._parts is None:
                 import onnxruntime as ort
                 from tokenizers import Tokenizer
 
@@ -193,25 +201,43 @@ class OnnxRuriEmbedder:
                 # stdout is reserved for JSON-RPC on a stdio MCP server, so
                 # keep ORT's warnings out of it too (3 = ERROR and above only)
                 opts.log_severity_level = 3
-                self._session = ort.InferenceSession(
+                session = ort.InferenceSession(
                     str(self._dir / "model.onnx"),
                     sess_options=opts,
                     providers=["CPUExecutionProvider"],
                 )
-                self._input_names = [
-                    i.name for i in self._session.get_inputs()
-                ]
-                self._tokenizer = tok
-        return self._session
+                input_names = [i.name for i in session.get_inputs()]
+                self._parts = (session, tok, input_names)
+            return self._parts
+
+    @property
+    def loaded(self) -> bool:
+        """Whether the model is currently in memory (used by idle unload)."""
+        return self._parts is not None
+
+    def unload(self) -> bool:
+        """Release the model from memory. Returns True if it was loaded.
+
+        A stdio MCP server is a resident process, so clients that spawn one
+        MCP process per execution host and leave them running (observed with
+        Codex Desktop 26.810: four processes at once) pile up ~1.1 GB of ONNX
+        model per process. Releasing the model when idle costs only a reload
+        (a few seconds for ONNX) on next use; no memories are lost.
+        Safe against a concurrent _encode (see the _load docstring).
+        """
+        with self._lock:
+            was_loaded = self._parts is not None
+            self._parts = None
+        return was_loaded
 
     def _encode(self, texts: list[str]) -> np.ndarray:
-        session = self._load()
-        encodings = self._tokenizer.encode_batch(texts)
+        session, tokenizer, input_names = self._load()
+        encodings = tokenizer.encode_batch(texts)
         ids = np.asarray([e.ids for e in encodings], dtype=np.int64)
         mask = np.asarray([e.attention_mask for e in encodings], dtype=np.int64)
 
         feeds: dict[str, np.ndarray] = {}
-        for name in self._input_names:
+        for name in input_names:
             if name == "input_ids":
                 feeds[name] = ids
             elif name == "attention_mask":
